@@ -3,29 +3,42 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from cv_bridge import CvBridge
-import cv2
 from ultralytics import YOLO
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
 class YOLODetectorNode(Node):
     def __init__(self):
         super().__init__('YOLOv8_detector_node')
 
-        # Subscribers
-        self.subscription = self.create_subscription(
-            Image,
-            'iris_camera/camera/image_raw',
-            self.data_callback,
-            10)
-        self.subscription  # unused warning 방지
+        """
+        0. Configure QoS profile for publishing and subscribing
+        """
+        qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
 
-        # Publishers
-        self.publisher = self.create_publisher(Image, '/yolov8/detection_image', 10)
-        self.bbox_publisher = self.create_publisher(String, '/yolov8/bounding_boxes', 10)
+        """
+        1. Create Subscribers
+        """
+        self.subscription = self.create_subscription(
+            Image, 'iris_camera/camera/image_raw', self.data_callback, qos_profile
+        )
+
+        """
+        2. Create Publishers
+        """
+        self.publisher = self.create_publisher(
+            Image, '/yolov8/detection_image', qos_profile
+        )
+        self.bbox_publisher = self.create_publisher(
+            String, '/yolov8/bounding_boxes', qos_profile
+        )
 
         self.bridge = CvBridge()
-
-        # YOLOv8
-        self.model = YOLO('/home/gr/runs/detect/train/weights/best.pt')
+        self.model = YOLO('/home/gr/RL_controller/data/best.pt')
 
     def data_callback(self, msg):
         try:
@@ -44,7 +57,6 @@ class YOLODetectorNode(Node):
         # 검출된 이미지를 ROS 이미지 메시지로 변환 후 publish
         detection_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding='bgr8')
         self.publisher.publish(detection_msg)
-        self.get_logger().info('검출 결과 이미지 발행')
 
         # 검출된 바운딩 박스 좌표 추출 (각 박스: [x1, y1, x2, y2])
         boxes = results[0].boxes
@@ -59,7 +71,6 @@ class YOLODetectorNode(Node):
         bbox_msg = String()
         bbox_msg.data = bbox_str
         self.bbox_publisher.publish(bbox_msg)
-        self.get_logger().info('검출된 바운딩 박스 좌표 발행: ' + bbox_str)
 
 def main(args=None):
     rclpy.init(args=args)
