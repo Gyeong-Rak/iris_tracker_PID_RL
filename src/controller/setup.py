@@ -1,6 +1,6 @@
 from setuptools import setup
 
-package_name = 'RL_controller'
+package_name = 'controller'
 
 setup(
     name=package_name,
@@ -15,14 +15,15 @@ setup(
     zip_safe=True,
     maintainer='gr',
     maintainer_email='rudkfr5978@naver.com',
-    description='Quadrotor Controller using Reinforcement Learning',
+    description='Quadrotor Controller',
     license='NONE',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'yolo_detection = RL_controller.yolo_detector:main',
-            'iris_controller = RL_controller.iris_controller:main',
-            'iris_camera_controller_PID = RL_controller.iris_camera_controller_PID:main',
+            'yolo_detection = controller.yolo_detector:main',
+            'iris_controller = controller.iris_controller:main',
+            'iris_camera_controller_PID_setpoint = controller.iris_camera_controller_PID_setpoint:main',
+            'iris_camera_controller_PID_motor = controller.iris_camera_controller_PID_motor:main',
         ],
     },
 )

@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>RL_controller</name>
+  <name>controller</name>
   <version>0.0.0</version>
-  <description>Quadrotor Conrtoller using Reinforcement Learning</description>
+  <description>Quadrotor Conrtollers</description>
   <maintainer email="rudkfr5978@naver.com">gr</maintainer>
   <license>None</license>
 

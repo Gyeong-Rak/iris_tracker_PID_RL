@@ -38,7 +38,7 @@ class YOLODetectorNode(Node):
         )
 
         self.bridge = CvBridge()
-        self.model = YOLO('/home/gr/RL_controller/data/best.pt')
+        self.model = YOLO('/home/gr/iris_tracker_PID_RL/data/best.pt')
 
     def data_callback(self, msg):
         try:

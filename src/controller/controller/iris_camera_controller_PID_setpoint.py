@@ -350,9 +350,9 @@ class IrisCameraController(Node):
                 # self.get_logger().info(f"center={bbox_center}, filtered area={filtered_bbox_area:.0f}")
                 error_lateral = (self.image_center[0] - bbox_center[0])
                 error_vertical = (self.image_center[1] - bbox_center[1]) - self.pitch/0.5615 * 240
-                error_forward = self.normalized_forward_error(self.area2distance(filtered_bbox_area), self.desired_bbox_area - filtered_bbox_area)
+                error_forward = self.area2distance(filtered_bbox_area) - self.desired_distance
 
-                # self.get_logger().info(f"E_lat: {error_lateral:0f}, E_ver: {error_vertical:.0f}, E_for: {error_forward:.0f}")
+                self.get_logger().info(f"E_lat: {error_lateral:0f}, E_ver: {error_vertical:.0f}, E_for: {error_forward:.0f}")
             else:
                 self.get_logger().info("No detection received.")
                 filtered_bbox_area = 0
@@ -368,6 +368,7 @@ class IrisCameraController(Node):
             correction_vertical = self.pid_vertical.update(error_vertical)
             correction_forward = np.clip(self.pid_forward.update(error_forward), -3, 3)
             correction_yaw = np.clip(self.pid_lateral.update(error_lateral), -0.5, 0.5)
+            if correction_forward == 3 and correction_vertical > 1: correction_vertical = 5
 
             print(f"ver_cor:{correction_vertical:0f}, for_cor:{correction_forward:0f}, lat_cor:{math.degrees(correction_yaw):0f}")
 
