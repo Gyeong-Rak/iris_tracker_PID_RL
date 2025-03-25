@@ -3,7 +3,7 @@ import rclpy
 from rclpy.node import Node
 import math
 import numpy as np
-import os, time
+import os, random
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
 # import px4_msgs
@@ -149,8 +149,9 @@ class iris_controller(Node):
             # self.vertical_oscillation_trajectory(1.5, 0.4) # amplitude, vertical_speed
             # self.xy_helical_trajectory(5, 0.4, 1.5, 0.6) # radius, omega, amplitude, vertical_speed
             # self.forward_trajectory(3, 0.4) # amplitude, speed
-            # self.distance_measure()
-            self.xyz_helical_trajectory(3, 0.2, 1) # radius, omega, speed
+            # self.distance_measure_trajectory()
+            # self.xyz_helical_trajectory(3, 0.2, 1) # radius, omega, speed
+            self.random_waypoint_trajectory()
 
     """
     Callback functions for subscribers.
@@ -276,7 +277,7 @@ class iris_controller(Node):
 
         self.publish_local2global_setpoint(local_setpoint=np.array([x_ned, y_ned, z_ned]))
 
-    def distance_measure(self):
+    def distance_measure_trajectory(self):
         now = self.get_clock().now().nanoseconds * 1e-9
         t = now - self.start_time - 20
         if t<10:
@@ -321,6 +322,35 @@ class iris_controller(Node):
         z_ned = -(center_z + radius * math.sin(theta))
 
         self.publish_local2global_setpoint(local_setpoint=np.array([x_ned, y_ned, z_ned]))
+
+    def random_waypoint_trajectory(self):
+        now = self.get_clock().now().nanoseconds * 1e-9
+        t = now - self.start_time
+        
+        if not hasattr(self, 'next_waypoint_time') or t >= self.next_waypoint_time:
+            self.next_waypoint_time = t + 0.01
+            speed = 0.4
+            if hasattr(self, 'current_waypoint'):
+                delta = np.array([
+                    random.uniform(-speed, speed),  # dx
+                    random.uniform(-speed, speed),  # dy
+                    random.uniform(-speed, speed)   # dz
+                ])
+
+                new_waypoint = self.current_waypoint + delta
+                self.current_waypoint = np.clip(
+                    new_waypoint,
+                    [-10.0, -10.0, -15.0],  # 최소값 (x, y, z)
+                    [10.0, 10.0, -5.0]      # 최대값 (x, y, z)
+                )
+            else:
+                self.current_waypoint = self.pos
+            
+            print(f"setpoint: [{self.current_waypoint[0]:.2f}, {self.current_waypoint[1]:.2f}, {self.current_waypoint[2]:.2f}]")
+        
+        # 현재 웨이포인트로 이동
+        if hasattr(self, 'current_waypoint'):
+            self.publish_local2global_setpoint(local_setpoint=self.current_waypoint)
 
 def main(args=None):
     rclpy.init(args=args)

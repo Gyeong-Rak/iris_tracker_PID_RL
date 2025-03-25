@@ -6,6 +6,7 @@ import numpy as np
 import ast
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 import matplotlib.pyplot as plt
+import argparse
 
 # import px4_msgs
 """msgs for subscription"""
@@ -18,7 +19,7 @@ from px4_msgs.msg import VehicleCommand
 from px4_msgs.msg import OffboardControlMode
 from px4_msgs.msg import TrajectorySetpoint
 
-from std_msgs.msg import String
+from std_msgs.msg import String, Int32
 
 class PID:
     def __init__(self, Kp, Ki, Kd, dt):
@@ -75,7 +76,9 @@ class IrisCameraController(Node):
         self.vehicle_global_position_subscriber = self.create_subscription(
             VehicleGlobalPosition, '/px4_1/fmu/out/vehicle_global_position', self.vehicle_global_position_callback, qos_profile
         )
-        self.yolo_detection_subscriber = self.create_subscription(String, '/yolov8/bounding_boxes', self.bbox_callback, qos_profile_yolo
+        self.yolo_detection_subscriber = self.create_subscription(String, '/YOLOv8/bounding_boxes', self.bbox_callback, qos_profile_yolo
+        )
+        self.fastsam_detection_subscriber = self.create_subscription(Int32, '/FastSAM/object_pixel_count', self.pixel_count_callback, qos_profile_yolo
         )
 
         """
@@ -112,69 +115,74 @@ class IrisCameraController(Node):
         4. PID variables
         """
         self.desired_distance = 3  # m
-        self.desired_bbox_area = self.distance2area(self.desired_distance)
-        self.image_center = np.array([320.0, 200.0])  # 640x480 이미지의 중심
+        self.desired_bbox_area = self.Distance2BBoxArea(self.desired_distance)
+        self.desired_pixel_count = self.Distance2PixelCount(self.desired_distance)
+        self.image_center = np.array([320.0, 240.0])  # 640x480 이미지의 중심
 
         # PID controller initialization
-        self.dt = 0.05  # 타이머 주기
-        # self.pid_forward = PID(Kp=2, Ki=0.01, Kd=0.01, dt=self.dt)
-        # self.pid_lateral = PID(Kp=0.008, Ki=0.00, Kd=0.001, dt=self.dt)
-        # self.pid_vertical = PID(Kp=0.03, Ki=0.002, Kd=0.001, dt=self.dt)
+        self.dt = 0.05
         self.pid_forward = PID(Kp=2, Ki=0.0, Kd=0.0, dt=self.dt)
-        self.pid_lateral = PID(Kp=0.008, Ki=0.0, Kd=0.0, dt=self.dt)
-        self.pid_vertical = PID(Kp=0.03, Ki=0.0, Kd=0.0, dt=self.dt)
+        self.pid_lateral = PID(Kp=0.007, Ki=0.0, Kd=0.01, dt=self.dt)
+        self.pid_vertical = PID(Kp=3, Ki=0.0, Kd=0.1, dt=self.dt)
 
-        # 최신 바운딩 박스 데이터 저장 (없으면 None)
         self.latest_bbox = None
         self.bbox_size_window = []  # 최근 10개의 bbox area를 저장하는 리스트
+        self.pixel_count_window = []  # 
 
-        """
-        5. Error plot variables
-        """
-        plt.ion()  # 인터랙티브 모드 활성화
-        self.fig, self.ax = plt.subplots(3, 1, figsize=(6, 5))
-        self.ax[0].set_title('Forward Error')
-        self.ax[1].set_title('Lateral Error')
-        self.ax[2].set_title('Vertical Error')
-        self.ax[2].set_xlabel('Time (s)')
-        self.time_data = []
-        self.forward_error_data = []
-        self.lateral_error_data = []
-        self.vertical_error_data = []
-        self.tagging_start_time = None  # Tagging 상태 시작 시각 기록용
-        fig_manager = plt.get_current_fig_manager()
-        fig_manager.window.setGeometry(3400, 1000, 700, 450)  # (X, Y, Width, Height)
+        # """
+        # 5. Error plot variables
+        # """
+        # plt.ion()  # 인터랙티브 모드 활성화
+        # self.fig, self.ax = plt.subplots(3, 1, figsize=(6, 5))
+        # self.ax[0].set_title('Forward Error')
+        # self.ax[1].set_title('Lateral Error')
+        # self.ax[2].set_title('Vertical Error')
+        # self.ax[2].set_xlabel('Time (s)')
+        # self.time_data = []
+        # self.forward_error_data = []
+        # self.lateral_error_data = []
+        # self.vertical_error_data = []
+        # self.tagging_start_time = None  # Tagging 상태 시작 시각 기록용
+        # fig_manager = plt.get_current_fig_manager()
+        # fig_manager.window.setGeometry(3400, 1000, 700, 450)  # (X, Y, Width, Height)
 
         # """
         # 5.1. Distance-Area plot variables
         # """
-        # self.fig, self.ax = plt.subplots(1, 1, figsize=(6, 5))  # 하나의 plot만 생성
-        # self.ax.set_title('Bounding Box Area')
-        # self.area_data = []
-        # self.csv_filename = "bbox_area_log.csv"
+        # self.fig, self.ax = plt.subplots(1, 1, figsize=(6, 5))
+        # self.ax.set_title('Pixel Count')
+        # self.csv_filename = "pixel_count_log.csv"
         # self.csv_file = open(self.csv_filename, mode='w', newline='')
         # self.csv_writer = csv.writer(self.csv_file)
-        # self.csv_writer.writerow(["Time (s)", "Filtered BBox Area"])  # 헤더 작성
+        # self.csv_writer.writerow(["Time (s)", "Pixel count"])
 
         """
         6. Timer setup
         """
-        self.offboard_heartbeat = self.create_timer(0.05, self.offboard_heartbeat_callback) # 20Hz 
-        self.main_timer = self.create_timer(0.05, self.main_callback) # 20Hz
+        self.offboard_heartbeat = self.create_timer(0.02, self.offboard_heartbeat_callback) # 50Hz 
+        self.main_timer = self.create_timer(0.1, self.main_callback) # 10Hz
+
+        """
+        7. Node parameter
+        """
+        self.declare_parameter('mode', 'bbox')
+        self.control_mode = self.get_parameter('mode').get_parameter_value().string_value
 
     """
     Helper Functions
     """ 
-    def distance2area(self, distance):
+    def Distance2BBoxArea(self, distance):
         return 79162.49 * np.exp(-0.94 * distance) + 2034.21 # fitting result
     
-    def area2distance(self, area):
-        return min(-1/0.94 * math.log((area-2034.21)/79162.49), 7)
+    def BBoxArea2Distance(self, bbox_area):
+        bbox_area = max(2034.30, bbox_area)
+        return min(-1/0.94 * math.log((bbox_area-2034.21)/79162.49), 20)
 
-    def normalized_forward_error(self, distance, forward_error):
-        dA_dd = -0.94 * 79162.49 * np.exp(-0.94 * distance) # distance2area 함수의 도함수
-        normalized_error = -forward_error / dA_dd # 면적 오차를 도함수로 나눠서 거리 오차로 환산 (부호 보정)
-        return normalized_error
+    def Distance2PixelCount(self, distance):
+        return 6941.21 / (distance**2)
+    
+    def PixelCount2Distance(self, pixel_count):
+        return min(math.sqrt(6941.21 / pixel_count), 20)
 
     def set_home_position(self):
         """Convert global GPS coordinates to local coordinates relative to home position"""     
@@ -239,7 +247,7 @@ class IrisCameraController(Node):
             self.area_line.set_xdata(self.time_data)
             self.area_line.set_ydata(self.area_data)
         else:
-            self.area_line, = self.ax.plot(self.time_data, self.area_data, label='Area', color='red')
+            self.area_line, = self.ax.plot(self.time_data, self.area_data, label='Pixel count', color='red')
 
         self.ax.relim()
         self.ax.autoscale_view()
@@ -260,6 +268,24 @@ class IrisCameraController(Node):
             return mean_area  # 모두 outlier면 그냥 전체 평균 사용
         else:
             return np.mean(inliers)
+        
+    def get_filtered_pixel_count(self):
+        if len(self.pixel_count_window) == 0:
+            return 0
+        arr = np.array(self.pixel_count_window)
+        mean_count = np.mean(arr)
+        std_count = np.std(arr)
+        inliers = arr[(arr >= mean_count - 2 * std_count) & (arr <= mean_count + 2 * std_count)] # remove outliers
+        if len(inliers) == 0:
+            return mean_count  # 모두 outlier면 그냥 전체 평균 사용
+        else:
+            return np.mean(inliers)
+
+    def VerticalError2RelativeAltitude(self, error_vertical, distance, vertical_fov=1.123):
+        angle_per_pixel = vertical_fov / 480
+        angle_offset = error_vertical * angle_per_pixel
+        total_angle = self.pitch + angle_offset
+        return distance * math.sin(total_angle)
 
     """
     Callback functions for subscribers.
@@ -301,18 +327,41 @@ class IrisCameraController(Node):
                     self.bbox_size_window.append(area)
                     if len(self.bbox_size_window) > 10:
                         self.bbox_size_window.pop(0)
+                    if self.state == 'Tagging':
+                        print("YOLO detected")
             else:
-                # 감지가 없을 경우 기존 데이터를 유지
-                self.get_logger().warn("YOLO detection lost, using last detected bounding box.")
+                self.latest_bbox = None
+                if self.state == 'Tagging':
+                    print("YOLO detection lost")
         except Exception as e:
-            self.get_logger().error("Failed to parse bounding box: " + str(e))
+            print("Failed to parse bounding box: " + str(e))
 
+    def pixel_count_callback(self, msg):
+        if msg.data == 0:
+            self.pixel_count = None
+        else:
+            self.pixel_count = msg.data
+
+            self.pixel_count_window.append(self.pixel_count)
+            if len(self.pixel_count_window) > 10:
+                self.pixel_count_window.pop(0)
+
+            if self.state == 'Tagging':
+                print(f"FastSAM pixel count received: {self.pixel_count}")
 
     """
-    Callback functions for therosgraph timers
+    Callback functions for timers
     """
     def offboard_heartbeat_callback(self):
         """offboard heartbeat signal"""
+        # Log the current time delta from the last call to monitor timing consistency
+        current_time = self.get_clock().now()
+        if hasattr(self, 'last_heartbeat_time'):
+            delta = (current_time - self.last_heartbeat_time).nanoseconds / 1e9
+            if delta > 0.06:  # More than 60ms between heartbeats
+                self.get_logger().warn(f"Heartbeat delay detected: {delta:.3f}s")
+        self.last_heartbeat_time = current_time
+        
         self.publish_offboard_control_mode(position=True)
 
     def main_callback(self):
@@ -346,47 +395,75 @@ class IrisCameraController(Node):
 
             if self.latest_bbox is not None:
                 bbox_center = self.latest_bbox['center']
-                filtered_bbox_area = self.get_filtered_bbox_area()
-                # self.get_logger().info(f"center={bbox_center}, filtered area={filtered_bbox_area:.0f}")
-                error_lateral = (self.image_center[0] - bbox_center[0])
-                error_vertical = (self.image_center[1] - bbox_center[1]) - self.pitch/0.5615 * 240
-                error_forward = self.area2distance(filtered_bbox_area) - self.desired_distance
+                print(self.get_filtered_pixel_count())
 
-                self.get_logger().info(f"E_lat: {error_lateral:0f}, E_ver: {error_vertical:.0f}, E_for: {error_forward:.0f}")
+                if self.control_mode == 'bbox':
+                    filtered_bbox_area = self.get_filtered_bbox_area()
+                    error_lateral = (self.image_center[0] - bbox_center[0])
+                    error_vertical = self.VerticalError2RelativeAltitude(self.image_center[1] - bbox_center[1], self.BBoxArea2Distance(filtered_bbox_area))
+                    error_forward = self.BBoxArea2Distance(filtered_bbox_area) - self.desired_distance
+                elif self.control_mode == 'pixel' and self.get_filtered_pixel_count() > 10:
+                    filtered_pixel_count = self.get_filtered_pixel_count()
+                    error_lateral = (self.image_center[0] - bbox_center[0])
+                    error_vertical = self.VerticalError2RelativeAltitude(self.image_center[1] - bbox_center[1], self.PixelCount2Distance(filtered_pixel_count))
+                    error_forward = self.PixelCount2Distance(filtered_pixel_count) - self.desired_distance
+                else:
+                    target_ned = np.array([0.0, 0.0, -10.0])
+                    self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
+                    print(f"Go to origin")
+                    return
+
+                print(f"  ver_E: {error_vertical:.2f},   lat_E: {error_lateral:.2f},   for_E: {error_forward:.2f}")
+
+                correction_vertical = self.pid_vertical.update(error_vertical)
+                correction_forward = np.clip(self.pid_forward.update(error_forward), -3, 20)
+                correction_yaw = np.clip(self.pid_lateral.update(error_lateral), -0.5, 0.5)
+                if correction_forward == 20 and correction_vertical > 0: correction_vertical = 5
+                
+                print(f"ver_cor: {correction_vertical:.2f}, lat_cor: {math.degrees(correction_yaw):.2f}, for_cor: {correction_forward:.2f}")
+
+                new_yaw = self.yaw - correction_yaw
+
+                east_error = np.sin(self.yaw) * correction_forward
+                north_error = np.cos(self.yaw) * correction_forward
+
+                local_enu_setpoint = np.array([east_error, north_error, correction_vertical])
+                local_ned_setpoint = self.pos + enu_to_ned(local_enu_setpoint)
+                self.publish_setpoint(setpoint=local_ned_setpoint, yaw_sp=new_yaw)
+                # self.publish_local2global_setpoint(local_setpoint=np.array([0, 0, -5]))
+
             else:
-                self.get_logger().info("No detection received.")
-                filtered_bbox_area = 0
-                enu_setpoint = np.array([0, 0, 0])
-                ned_setpoint = self.pos + enu_to_ned(enu_setpoint)
-                new_yaw = self.yaw - 0
-                self.publish_setpoint(setpoint=ned_setpoint, yaw_sp=new_yaw)
+                """
+                Missing state policy
+                """
+                # ### go to view point
 
-            current_time = self.get_clock().now().nanoseconds * 1e-9 - self.tagging_start_time
-            self.update_error_plot(current_time, error_forward, error_lateral, error_vertical)
-            # self.update_area_plot(current_time, filtered_bbox_area)
+                # target_offset_ned = np.array([0.0, 0.0, -10.0])  # home_position 기준 상대 좌표
+                # target_ned = self.home_position + target_offset_ned  # home_position을 기준으로 변환된 목표 위치
 
-            correction_vertical = self.pid_vertical.update(error_vertical)
-            correction_forward = np.clip(self.pid_forward.update(error_forward), -3, 3)
-            correction_yaw = np.clip(self.pid_lateral.update(error_lateral), -0.5, 0.5)
-            if correction_forward == 3 and correction_vertical > 1: correction_vertical = 5
+                # delta_x = -self.home_position[0]
+                # delta_y = -self.home_position[1]
 
-            print(f"ver_cor:{correction_vertical:0f}, for_cor:{correction_forward:0f}, lat_cor:{math.degrees(correction_yaw):0f}")
+                # yaw_to_target_ned = np.degrees(np.arctan2(delta_y, delta_x))
 
-            new_yaw = self.yaw - correction_yaw
-            # new_yaw = self.yaw
+                # self.publish_setpoint(setpoint=target_ned, yaw_sp=yaw_to_target_ned)
+                # print(f"Setpoint: {target_ned}")
 
-            yaw_rad = np.radians(self.yaw)
-            cos_yaw = np.cos(yaw_rad)
-            sin_yaw = np.sin(yaw_rad)
+                ### go to origin
 
-            x_enu = cos_yaw * correction_forward - sin_yaw * 0
-            y_enu = sin_yaw * correction_forward + cos_yaw * 0
+                target_ned = np.array([0.0, 0.0, -10.0])
+                self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
+                print(f"Go to origin")
 
-            local_enu_setpoint = np.array([x_enu, y_enu, correction_vertical])
-            # local_enu_setpoint = np.array([x_enu, y_enu, 0])
-            local_ned_setpoint = self.pos + enu_to_ned(local_enu_setpoint)
-            self.publish_setpoint(setpoint=local_ned_setpoint, yaw_sp=new_yaw)
+                # ### just turn
+
+                # self.publish_setpoint(setpoint = [0.0, 0.0, 0.0], yaw_sp = self.yaw)
+
+
+            # current_time = self.get_clock().now().nanoseconds * 1e-9 - self.tagging_start_time
+            # self.update_error_plot(current_time, error_forward, error_lateral, error_vertical)
             # self.publish_local2global_setpoint(local_setpoint=np.array([0, 0, -5]))
+            # self.update_area_plot(current_time, self.pixel_count)
 
     """
     Functions for publishing topics.

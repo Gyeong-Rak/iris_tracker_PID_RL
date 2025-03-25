@@ -13,12 +13,11 @@ from px4_msgs.msg import VehicleStatus
 from px4_msgs.msg import VehicleLocalPosition
 from px4_msgs.msg import VehicleGlobalPosition
 from px4_msgs.msg import VehicleAttitude
+from std_msgs.msg import String
 """msgs for publishing"""
 from px4_msgs.msg import VehicleCommand
 from px4_msgs.msg import OffboardControlMode
 from px4_msgs.msg import ActuatorMotors
-
-from std_msgs.msg import String
 
 class PID:
     def __init__(self, Kp, Ki, Kd, dt):
