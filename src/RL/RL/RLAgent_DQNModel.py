@@ -37,9 +37,9 @@ class ReplayBuffer:
         return len(self.buffer)
 
 class RLAgent:
-    def __init__(self, state_size, action_size, learning_rate=0.001, gamma=0.99):
-        self.state_size = state_size
-        self.action_size = action_size
+    def __init__(self, learning_rate=0.001, gamma=0.99):
+        self.state_size = 5
+
         self.gamma = gamma  # discount factor
         self.epsilon = 1.0  # exploration rate
         self.epsilon_min = 0.01
@@ -48,14 +48,13 @@ class RLAgent:
         self.learning_rate = learning_rate
         
         # Define action space
-        self.motor0 = np.concatenate(np.linspace(-1.0, 0.0, 5), np.linspace(0.1, 1.0, 10)) # [-1.0, -0.75, -0.5, -0.25, 0.0, 0.1, 0.2, 0.3, ..., 1.0]
-        self.motor1 = np.concatenate(np.linspace(-1.0, 0.0, 5), np.linspace(0.1, 1.0, 10))
-        self.motor2 = np.concatenate(np.linspace(-1.0, 0.0, 5), np.linspace(0.1, 1.0, 10))
-        self.motor3 = np.concatenate(np.linspace(-1.0, 0.0, 5), np.linspace(0.1, 1.0, 10))
+        self.motor_action_space = np.linspace(0.0, 1.0, 5) # [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        self.action_size_per_motor = len(self.motor_action_space)
+        self.action_size = (self.action_size_per_motor)**4
         
         # Initialize networks
-        self.model = DQNModel(state_size, action_size)
-        self.target_model = DQNModel(state_size, action_size)
+        self.model = DQNModel(self.state_size, self.action_size)
+        self.target_model = DQNModel(self.state_size, self.action_size)
         self.target_model.load_state_dict(self.model.state_dict())
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         
@@ -82,11 +81,11 @@ class RLAgent:
             action_idx = torch.argmax(q_values).item()
         
         # Convert action index to actual control values
-        # action 총 개수가 15 * 15 * 15 * 15개 일 때, action_idx하나가 정해지면 아래 과정을 통해 action을 정한다
-        motor0_idx = action_idx % 15 # result: 0~14
-        motor1_idx = (action_idx // 15) % 15
-        motor2_idx = (action_idx // 225) % 15
-        motor3_idx = (action_idx // 3375) % 15
+        # action 총 개수가 x * x * x * x개 일 때, action_idx하나가 정해지면 아래 과정을 통해 action을 정한다
+        motor0_idx = action_idx % self.action_size_per_motor # result: 0 ~ (self.action_size_per_motor - 1)
+        motor1_idx = (action_idx // self.action_size_per_motor) % self.action_size_per_motor
+        motor2_idx = (action_idx // (self.action_size_per_motor)**2) % self.action_size_per_motor
+        motor3_idx = (action_idx // (self.action_size_per_motor)**3) % self.action_size_per_motor
         
         return {
             'motor0': self.motor0[motor0_idx],
@@ -96,9 +95,9 @@ class RLAgent:
             'action_idx': action_idx
         }
     
-    def remember(self, state, action, reward, next_state, done):
+    def remember(self, state, action, reward, next_state, done_episode):
         """Store experience in memory"""
-        self.memory.push(state, action, reward, next_state, done)
+        self.memory.push(state, action, reward, next_state, done_episode)
         
     def train(self):
         """Train the network using experience replay"""
@@ -164,75 +163,76 @@ class RLAgent:
         self.target_model.load_state_dict(self.model.state_dict())
 
 
-# Helper functions for reward computation
-def compute_reward(lateral_error, vertical_error, forward_error, roll, pitch):
-    """Compute reward based on tracking errors and control actions"""
-    # Target region - higher reward for getting close to target
-    target_reward = 0
-    if abs(lateral_error) < 30 and abs(vertical_error) < 30 and abs(forward_error) < 0.5:
-        target_reward = 10.0
-    elif abs(lateral_error) < 60 and abs(vertical_error) < 60 and abs(forward_error) < 1.0:
-        target_reward = 5.0
+    # Helper functions for reward computation
+    def compute_reward(self, lateral_error, vertical_error, forward_error, roll, pitch):
+        """Compute reward based on tracking errors and control actions"""
+        # Target region - higher reward for getting close to target
+        target_reward = 0
+        if abs(lateral_error) < 32 and abs(vertical_error) < 24 and abs(forward_error) < 0.5:
+            target_reward = 10.0
+        elif abs(lateral_error) < 64 and abs(vertical_error) < 48 and abs(forward_error) < 1.0:
+            target_reward = 5.0
+            
+        # Error penalties - penalize being far from target
+        lateral_penalty = -0.01 * min(abs(lateral_error), 300)
+        vertical_penalty = -0.01 * min(abs(vertical_error), 300)
+        forward_penalty = -0.01 * min(abs(forward_error), 300)
         
-    # Error penalties - penalize being far from target
-    lateral_penalty = -0.01 * min(abs(lateral_error), 200)
-    vertical_penalty = -0.01 * min(abs(vertical_error), 200)
-    forward_penalty = -0.01 * min(abs(forward_error), 500)
-    
-    # Attitude penalties - penalize unstable attitude
-    attitude_penalty = -0.01 * (abs(roll) + abs(pitch))
-    
-    # Total reward
-    reward = target_reward + lateral_penalty + vertical_penalty + forward_penalty + attitude_penalty
-    
-    return reward
+        # Attitude penalties - penalize unstable attitude
+        attitude_penalty = -0.01 * (abs(roll) + abs(pitch))
+        
+        # Total reward
+        reward = target_reward + lateral_penalty + vertical_penalty + forward_penalty + attitude_penalty
+        
+        return reward
 
 
-# Example usage to train a model offline
-def train_model_offline(train_data, num_episodes=1000):
-    """
-    Train model offline using collected data
-    
-    Args:
-        train_data: List of dictionaries containing state, action, reward, next_state, done
-        num_episodes: Number of episodes to train
-    """
-    state_size = 5  # [lateral_error, vertical_error, forward_error, roll, pitch]
-    action_size = 15 * 15 * 15 * 15 # Discretized actions for motors
-    
-    agent = RLAgent(state_size, action_size)
-    
-    # Add data to replay buffer
-    for sample in train_data:
-        agent.memory.push(
-            sample['state'], 
-            sample['action_idx'], 
-            sample['reward'], 
-            sample['next_state'], 
-            sample['done']
-        )
-    
-    # Train for specified episodes
-    for episode in range(num_episodes):
-        agent.train()
+    # # Example usage to train a model offline
+    # def train_model_offline(self, train_data, num_episodes=1000):
+    #     """
+    #     Train model offline using collected data
         
-        if episode % 100 == 0:
-            print(f"Episode {episode}/{num_episodes}")
-    
-    # Save trained model
-    agent.save_model("drone_rl_model_offline.pth")
-    print("Offline training complete. Model saved.")
-    
-    return agent
+    #     Args:
+    #         train_data: List of dictionaries containing state, action, reward, next_state, done
+    #         num_episodes: Number of episodes to train
+    #     """
+    #     state_size = 5  # [lateral_error, vertical_error, forward_error, roll, pitch]
+    #     action_size = (self.action_size_per_motor)**4 # Discretized actions for motors
+        
+    #     agent = RLAgent(state_size, action_size)
+        
+    #     # Add data to replay buffer
+    #     for sample in train_data:
+    #         agent.memory.push(
+    #             sample['state'], 
+    #             sample['action_idx'], 
+    #             sample['reward'], 
+    #             sample['next_state'], 
+    #             sample['done']
+    #         )
+        
+    #     # Train for specified episodes
+    #     for episode in range(num_episodes):
+    #         agent.train()
+            
+    #         if episode % 100 == 0:
+    #             print(f"Episode {episode}/{num_episodes}")
+        
+    #     # Save trained model
+    #     agent.save_model("drone_rl_model_offline.pth")
+    #     print("Offline training complete. Model saved.")
+        
+    #     return agent
 
 if __name__ == '__main__':
-    data = []
+    # data = []
     
-    print("Training model with synthetic data...")
-    agent = train_model_offline(data, num_episodes=500)
+    # print("Training model with synthetic data...")
+    # agent = train_model_offline(data, num_episodes=500)
     
-    # Optional: Test trained model
-    test_state = np.array([50.0, 30.0, 2.0, 0.0, 0.0, 0.0])
-    action = agent.get_action(test_state)
-    print(f"Test state: {test_state}")
-    print(f"Recommended action: {action}")
+    # # Optional: Test trained model
+    # test_state = np.array([50.0, 30.0, 2.0, 0.0, 0.0, 0.0])
+    # action = agent.get_action(test_state)
+    # print(f"Test state: {test_state}")
+    # print(f"Recommended action: {action}")
+    print('pass the main')

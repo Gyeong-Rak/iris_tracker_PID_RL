@@ -1,6 +1,6 @@
 from setuptools import setup
 
-package_name = 'utils'
+package_name = 'RL'
 
 setup(
     name=package_name,
@@ -20,8 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'yolo_detector = utils.YOLOv8:main',
-            'fastSAM_detector = utils.FastSAM:main',
+            'RL_online_train = RL.RL_online_train:main',
         ],
     },
 )

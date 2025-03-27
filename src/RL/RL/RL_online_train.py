@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-import os, math, csv
 import numpy as np
-import ast
+import math, os, ast
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-import matplotlib.pyplot as plt
-import argparse
+import RLAgent_DQNModel
 
 """msgs for subscription"""
 from px4_msgs.msg import VehicleStatus
@@ -19,29 +17,11 @@ from std_msgs.msg import String, Int32
 from px4_msgs.msg import VehicleCommand
 from px4_msgs.msg import OffboardControlMode
 from px4_msgs.msg import TrajectorySetpoint
+from px4_msgs.msg import ActuatorMotors
 
-class PID:
-    def __init__(self, Kp, Ki, Kd, dt):
-        self.Kp = Kp
-        self.Ki = Ki
-        self.Kd = Kd
-        self.dt = dt
-        self.integral = 0.0
-        self.prev_error = 0.0
-
-    def update(self, error):
-        self.integral += error * self.dt
-        derivative = (error - self.prev_error) / self.dt
-        output = self.Kp * error + self.Ki * self.integral + self.Kd * derivative
-        self.prev_error = error
-        return output
-
-def enu_to_ned(enu_vec):
-    return np.array([enu_vec[1], enu_vec[0], -enu_vec[2]])
-
-class IrisCameraController(Node):
+class RLtraining(Node):
     def __init__(self):
-        super().__init__('iris_camera_controller')
+        super().__init__('RL_model_training')
 
         """
         0. Configure QoS profile for publishing and subscribing
@@ -67,7 +47,7 @@ class IrisCameraController(Node):
             VehicleStatus, '/px4_1/fmu/out/vehicle_status', self.vehicle_status_callback, qos_profile
         )
         self.vehicle_pitch_subscriber = self.create_subscription(
-            VehicleAttitude, '/px4_1/fmu/out/vehicle_attitude', self.vehicle_pitch_callback, qos_profile
+            VehicleAttitude, '/px4_1/fmu/out/vehicle_attitude', self.roll_pitch_callback, qos_profile
         )
         self.vehicle_local_position_subscriber = self.create_subscription(
             VehicleLocalPosition, '/px4_1/fmu/out/vehicle_local_position', self.vehicle_local_position_callback, qos_profile
@@ -94,70 +74,41 @@ class IrisCameraController(Node):
         self.trajectory_setpoint_publisher = self.create_publisher(
             TrajectorySetpoint, '/px4_1/fmu/in/trajectory_setpoint', qos_profile
         )
+        self.motor_command_publisher = self.create_publisher(
+            ActuatorMotors, '/px4_1/fmu/in/actuator_motors', qos_profile
+        )
 
         """
         3. Status variables
         """
-        # Vehicle status, attitude
+        # Vehicle attitude
         self.vehicle_status = VehicleStatus()
         self.vehicle_attitude = VehicleAttitude()
         self.pos = np.array([0.0, 0.0, 0.0])
         self.pos_gps = np.array([0.0, 0.0, 0.0])
-        self.yaw = 0.0
+        self.roll = 0.0
         self.pitch = 0.0
         self.home_position = np.array([0.0, 0.0, 0.0])
-        self.home_position_gps = np.array([0.0, 0.0, 0.0])  # Store initial GPS position
+        self.home_position_gps = np.array([0.0, 0.0, 0.0])
         self.get_position_flag = False
+
         # Vehicle state
         self.state = 'ready2flight' # ready2flight -> takeoff -> Tagging
 
         """
-        4. PID variables
+        4. Learning variables
         """
         self.desired_distance = 3  # m
         self.desired_bbox_area = self.Distance2BBoxArea(self.desired_distance)
         self.desired_pixel_count = self.Distance2PixelCount(self.desired_distance)
-        self.image_center = np.array([320.0, 240.0])  # 640x480 이미지의 중심
-
-        # PID controller initialization
-        self.dt = 0.05
-        self.pid_forward = PID(Kp=2, Ki=0.0, Kd=0.0, dt=self.dt)
-        self.pid_lateral = PID(Kp=0.007, Ki=0.0, Kd=0.01, dt=self.dt)
-        self.pid_vertical = PID(Kp=2, Ki=0.0, Kd=0.1, dt=self.dt)
+        self.image_center = np.array([320.0, 200.0])  # 640x480 이미지의 중심
 
         self.latest_bbox = None
         self.bbox_size_window = []  # 최근 10개의 bbox area를 저장하는 리스트
-        self.pixel_count_window = []  # 
-
-        # """
-        # 5. Error plot variables
-        # """
-        # plt.ion()  # 인터랙티브 모드 활성화
-        # self.fig, self.ax = plt.subplots(3, 1, figsize=(6, 5))
-        # self.ax[0].set_title('Forward Error')
-        # self.ax[1].set_title('Lateral Error')
-        # self.ax[2].set_title('Vertical Error')
-        # self.ax[2].set_xlabel('Time (s)')
-        # self.time_data = []
-        # self.forward_error_data = []
-        # self.lateral_error_data = []
-        # self.vertical_error_data = []
-        # self.tagging_start_time = None  # Tagging 상태 시작 시각 기록용
-        # fig_manager = plt.get_current_fig_manager()
-        # fig_manager.window.setGeometry(3400, 1000, 700, 450)  # (X, Y, Width, Height)
-
-        # """
-        # 5.1. Distance-Area plot variables
-        # """
-        # self.fig, self.ax = plt.subplots(1, 1, figsize=(6, 5))
-        # self.ax.set_title('Pixel Count')
-        # self.csv_filename = "pixel_count_log.csv"
-        # self.csv_file = open(self.csv_filename, mode='w', newline='')
-        # self.csv_writer = csv.writer(self.csv_file)
-        # self.csv_writer.writerow(["Time (s)", "Pixel count"])
+        self.pixel_count_window = []
 
         """
-        6. Timer setup
+        4. Timer setup
         """
         self.offboard_heartbeat = self.create_timer(0.02, self.offboard_heartbeat_callback) # 50Hz 
         self.main_timer = self.create_timer(0.1, self.main_callback) # 10Hz
@@ -165,8 +116,14 @@ class IrisCameraController(Node):
         """
         7. Node parameter
         """
-        self.declare_parameter('mode', 'bbox')
+        self.declare_parameter('mode', 'pixel')
         self.control_mode = self.get_parameter('mode').get_parameter_value().string_value
+
+        self.declare_parameter('episode', 0)
+        self.episode_number = self.get_parameter('episode').get_parameter_value().integer_value
+
+        self.declare_parameter('max_episodes', 50)
+        self.max_episodes = self.get_parameter('max_episodes').get_parameter_value().integer_value
 
     """
     Helper Functions
@@ -193,7 +150,7 @@ class IrisCameraController(Node):
             alt1 = float(os.environ.get('PX4_HOME_ALT', 0.0))
         except (ValueError, TypeError) as e:
             self.get_logger().error(f"Error converting environment variables: {e}")
-            lat1, lon1, alt1 = 0.0, 0.0, 0.0
+            lat1, lon1, alt1 = 47.397742, 8.545594, 488.0
             
         lat2, lon2, alt2 = self.pos_gps
         
@@ -213,49 +170,6 @@ class IrisCameraController(Node):
         self.home_position = np.array([x_ned, y_ned, z_ned])
         self.home_position_gps = np.array([lat1, lon1, alt1])
         return self.home_position    
-
-    def update_error_plot(self, time, forward_error, lateral_error, vertical_error):
-        self.time_data.append(time)
-        self.forward_error_data.append(forward_error)
-        self.lateral_error_data.append(lateral_error)
-        self.vertical_error_data.append(vertical_error)
-
-        self.ax[0].clear()
-        self.ax[1].clear()
-        self.ax[2].clear()
-        
-        self.ax[0].plot(self.time_data, self.forward_error_data, label='Forward Error', color='red')
-        self.ax[1].plot(self.time_data, self.lateral_error_data, label='Lateral Error', color='green')
-        self.ax[2].plot(self.time_data, self.vertical_error_data, label='Vertical Error', color='blue')
-
-        self.ax[0].legend()
-        self.ax[1].legend()
-        self.ax[2].legend()
-        self.ax[2].set_xlabel('Time (s)')
-        
-        self.fig.canvas.draw()
-        self.fig.canvas.flush_events()
-
-    def update_area_plot(self, time, area):
-        self.time_data.append(time)
-        self.area_data.append(area)
-
-        self.csv_writer.writerow([time, area])
-        self.csv_file.flush()
-
-        if hasattr(self, 'area_line'):
-            self.area_line.set_xdata(self.time_data)
-            self.area_line.set_ydata(self.area_data)
-        else:
-            self.area_line, = self.ax.plot(self.time_data, self.area_data, label='Pixel count', color='red')
-
-        self.ax.relim()
-        self.ax.autoscale_view()
-        self.ax.legend()
-        self.ax.set_xlabel('Time (s)')
-
-        self.fig.canvas.draw()
-        self.fig.canvas.flush_events()
 
     def get_filtered_bbox_area(self):
         if len(self.bbox_size_window) == 0:
@@ -294,17 +208,17 @@ class IrisCameraController(Node):
         """Callback function for vehicle_status topic subscriber."""
         self.vehicle_status = msg
 
-    def vehicle_pitch_callback(self, msg):
+    def roll_pitch_callback(self, msg):
         self.vehicle_attitude = msg
         w, x, y, z = msg.q[0], msg.q[1], msg.q[2], msg.q[3]
-        t = +2.0 * (w * y - z * x)
-        t = +1.0 if t > +1.0 else t
-        t = -1.0 if t < -1.0 else t
-        return math.asin(t)
+
+        self.pitch = math.atan2(2.0 * (w * y - z * x), math.sqrt(1 - (2.0 * (w * y - z * x))**2))
+        self.roll = math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
 
     def vehicle_local_position_callback(self, msg): # NED
         self.vehicle_local_position = msg
         self.pos = np.array([msg.x, msg.y, msg.z])
+        self.vel = np.array([msg.vx, msg.vy, msg.vz])
         self.yaw = msg.heading
 
     def vehicle_global_position_callback(self, msg):
@@ -364,10 +278,14 @@ class IrisCameraController(Node):
         self.publish_offboard_control_mode(position=True)
 
     def main_callback(self):
+        if self.control_mode not in ['bbox', 'pixel']:
+            self.get_logger().warn("ROS parameter error: mode should be 'bbox' or 'pixel'")
+            return
+
         if self.state == 'ready2flight':
             if self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_AUTO_LOITER:
                 if self.vehicle_status.arming_state == VehicleStatus.ARMING_STATE_DISARMED:
-                    print("Iris Camera Arming...")
+                    print("Irisstart_training.py를 실행하면 모델 학습이 잘 될 지, 꽁꽁히판단해줘. Camera Arming...")
                     self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0, target_system=2)
                 else:
                     self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_TAKEOFF, param7=10.0, target_system=2)
@@ -382,7 +300,7 @@ class IrisCameraController(Node):
         
         if self.state == 'takeoff':
             if self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_AUTO_LOITER:
-                print("Seeking...")
+                print("Learning start...")
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0, target_system=2)
                 self.state = 'Tagging'
                 self.tagging_start_time = self.get_clock().now().nanoseconds * 1e-9
@@ -391,77 +309,98 @@ class IrisCameraController(Node):
             error_lateral = 0.0
             error_vertical = 0.0
             error_forward = 0.0
-
+            
+            if not hasattr(self, 'rl_initialized'):
+                self.agent = RLAgent_DQNModel.RLAgent(learning_rate=0.001, gamma=0.99)
+                self.state_size = self.agent.state_size
+                self.action_size = self.agent.action_size
+                self.episode_steps = 0
+                self.episode_rewards = []
+                self.last_step_state = None
+                self.last_step_action_idx = None
+                
+                if os.path.exists("RL_model_temp.pth"):
+                    self.agent.load_model("RL_model_temp.pth")
+                    self.get_logger().info("Loaded existing RL model")
+                
+                self.rl_initialized = True
+                self.get_logger().info("RL training initialized")
+                return
+            
             if self.latest_bbox is not None:
                 bbox_center = self.latest_bbox['center']
-
+                filtered_bbox_area = self.get_filtered_bbox_area()
+                filtered_pixel_count = self.get_filtered_pixel_count()
+                
                 if self.control_mode == 'bbox':
-                    filtered_bbox_area = self.get_filtered_bbox_area()
                     error_lateral = (self.image_center[0] - bbox_center[0])
                     error_vertical = self.VerticalError2RelativeAltitude(self.image_center[1] - bbox_center[1], self.BBoxArea2Distance(filtered_bbox_area))
                     error_forward = self.BBoxArea2Distance(filtered_bbox_area) - self.desired_distance
-                elif self.control_mode == 'pixel' and self.get_filtered_pixel_count() > 10:
-                    filtered_pixel_count = self.get_filtered_pixel_count()
-                    error_lateral = (self.image_center[0] - bbox_center[0])
-                    error_vertical = self.VerticalError2RelativeAltitude(self.image_center[1] - bbox_center[1], self.PixelCount2Distance(filtered_pixel_count))
-                    error_forward = self.PixelCount2Distance(filtered_pixel_count) - self.desired_distance
-                else:
-                    target_ned = np.array([0.0, 0.0, -10.0])
-                    self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
-                    print(f"Go to origin")
-                    return
-
-                print(f"  ver_E: {error_vertical:.2f},   lat_E: {error_lateral:.2f},   for_E: {error_forward:.2f}")
-
-                correction_vertical = self.pid_vertical.update(error_vertical)
-                correction_forward = np.clip(self.pid_forward.update(error_forward), -3, 20)
-                correction_yaw = np.clip(self.pid_lateral.update(error_lateral), -0.5, 0.5)
-                if correction_forward == 20 and correction_vertical > 0: correction_vertical = 5
+                elif self.control_mode == 'pixel':
+                    if 10 < filtered_pixel_count <15000:
+                        error_lateral = (self.image_center[0] - bbox_center[0])
+                        error_vertical = self.VerticalError2RelativeAltitude(self.image_center[1] - bbox_center[1], self.PixelCount2Distance(filtered_pixel_count))
+                        error_forward = self.PixelCount2Distance(filtered_pixel_count) - self.desired_distance
+                    else:
+                        target_ned = np.array([0.0, 0.0, -10.0])
+                        self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
+                        print(f"Go to origin")
+                        return
                 
-                print(f"ver_cor: {correction_vertical:.2f}, lat_cor: {math.degrees(correction_yaw):.2f}, for_cor: {correction_forward:.2f}")
+                current_step_state = np.array([
+                    error_lateral,
+                    error_vertical,
+                    error_forward,
+                    self.roll,
+                    self.pitch
+                ])
+                
+                current_time = self.get_clock().now().nanoseconds * 1e-9
+                done_episode = current_time - self.latest_bbox['timestamp'] > 3.0
+                reward = self.agent.compute_reward(error_lateral, error_vertical, error_forward, self.roll, self.pitch)
+                
+                if self.last_step_state is not None and self.last_step_action_idx is not None:
+                    self.agent.remember(self.last_step_state, self.last_step_action_idx, reward, current_step_state, done_episode)
+                    self.episode_rewards.append(reward)
+                
+                action_dict = self.agent.get_action(current_step_state)
+                self.last_step_action = [
+                    action_dict['motor0'],
+                    action_dict['motor1'],
+                    action_dict['motor2'],
+                    action_dict['motor3']
+                ]
+                self.last_step_action_idx = action_dict['action_idx']
+                self.last_step_state = current_step_state
+                
+                self.publish_motor_command(self.last_step_action)
+                
+                self.agent.train()
+                
+                self.episode_steps += 1
 
-                new_yaw = self.yaw - correction_yaw
+                if self.episode_steps % 100 == 0:
+                    avg_reward = sum(self.episode_rewards) / len(self.episode_rewards) if self.episode_rewards else 0
+                    self.get_logger().info(f"Step: {self.episode_steps}, Avg Reward: {avg_reward:.2f}")
+                    
+                if done_episode:
+                    model_name = "RL_model_temp.pth"
+                    self.agent.save_model(model_name)
 
-                east_error = np.sin(self.yaw) * correction_forward
-                north_error = np.cos(self.yaw) * correction_forward
-
-                local_enu_setpoint = np.array([east_error, north_error, correction_vertical])
-                local_ned_setpoint = self.pos + enu_to_ned(local_enu_setpoint)
-                self.publish_setpoint(setpoint=local_ned_setpoint, yaw_sp=new_yaw)
-                # self.publish_local2global_setpoint(local_setpoint=np.array([0, 0, -5]))
-
+                    if self.episode_number == self.max_episodes:
+                        model_name = f"RL_model_final_episode{self.episode_number}.pth"
+                        self.agent.save_model(model_name)
+                        self.get_logger().info(f"Training complete. Model saved. Total episodes: {self.episode_number}")
+                        rclpy.shutdown()
+                    elif self.episode_number % 10 == 0:
+                        model_name = f"RL_model_episode{self.episode_number}.pth"
+                        self.agent.save_model(model_name)
+                        self.get_logger().info(f"Model saved. Current episodes: {self.episode_number}")
+                        return
             else:
-                """
-                Missing state policy
-                """
-                # ### go to view point
-
-                # target_offset_ned = np.array([0.0, 0.0, -10.0])  # home_position 기준 상대 좌표
-                # target_ned = self.home_position + target_offset_ned  # home_position을 기준으로 변환된 목표 위치
-
-                # delta_x = -self.home_position[0]
-                # delta_y = -self.home_position[1]
-
-                # yaw_to_target_ned = np.degrees(np.arctan2(delta_y, delta_x))
-
-                # self.publish_setpoint(setpoint=target_ned, yaw_sp=yaw_to_target_ned)
-                # print(f"Setpoint: {target_ned}")
-
-                ### go to origin
-
                 target_ned = np.array([0.0, 0.0, -10.0])
                 self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
                 print(f"Go to origin")
-
-                # ### just turn
-
-                # self.publish_setpoint(setpoint = [0.0, 0.0, 0.0], yaw_sp = self.yaw)
-
-
-            # current_time = self.get_clock().now().nanoseconds * 1e-9 - self.tagging_start_time
-            # self.update_error_plot(current_time, error_forward, error_lateral, error_vertical)
-            # self.publish_local2global_setpoint(local_setpoint=np.array([0, 0, -5]))
-            # self.update_area_plot(current_time, self.pixel_count)
 
     """
     Functions for publishing topics.
@@ -496,15 +435,18 @@ class IrisCameraController(Node):
         msg.direct_actuator = kwargs.get("direct_actuator", False)
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.offboard_control_mode_publisher.publish(msg)
-    
-    def publish_setpoint(self, **kwargs):
-        msg = TrajectorySetpoint()
-        setpoint = kwargs.get("setpoint", np.nan * np.zeros(3))
-        msg.position = list(setpoint)
-        msg.velocity = list(kwargs.get("velocity_sp", np.nan * np.zeros(3)))
-        msg.yaw = kwargs.get("yaw_sp", float('nan'))
+
+    def publish_offboard_control_mode(self, **kwargs):
+        msg = OffboardControlMode()
+        msg.position = kwargs.get("position", False)
+        msg.velocity = kwargs.get("velocity", False)
+        msg.acceleration = kwargs.get("acceleration", False)
+        msg.attitude = kwargs.get("attitude", False)
+        msg.body_rate = kwargs.get("body_rate", False)
+        msg.thrust_and_torque = kwargs.get("thrust_and_torque", False)
+        msg.direct_actuator = kwargs.get("direct_actuator", False)
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        self.trajectory_setpoint_publisher.publish(msg)
+        self.offboard_control_mode_publisher.publish(msg)
 
     def publish_local2global_setpoint(self, **kwargs):
         msg = TrajectorySetpoint()
@@ -518,17 +460,23 @@ class IrisCameraController(Node):
         self.get_logger().debug(f"Global setpoint: {global_setpoint}")
         self.trajectory_setpoint_publisher.publish(msg)
 
+    def publish_motor_command(self, motor_values):
+        msg = ActuatorMotors()
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        msg.timestamp_sample = msg.timestamp
+        msg.reversible_flags = 0  # 일반적인 쿼드로터에서는 0
+
+        # 12개 값 중 첫 4개 값만 사용, 나머지는 NaN
+        full_motor_values = np.full(12, np.nan, dtype=np.float32)
+        full_motor_values[:4] = motor_values  # 모터 0~3에 값 설정
+
+        msg.control = full_motor_values.tolist()
+        self.motor_command_publisher.publish(msg)
+
 def main(args=None):
     rclpy.init(args=args)
-    node = IrisCameraController()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        print("KeyboardInterrupt received. Exiting and keeping plot window open...")
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
-        plt.show(block=True)  # 프로그램 종료 후에도 plot 창 유지
+    node = RLtraining()
+    rclpy.spin(node)
 
 if __name__ == '__main__':
     main()
