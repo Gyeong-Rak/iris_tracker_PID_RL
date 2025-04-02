@@ -1,168 +1,47 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-import os, math, csv
+import os, math, pickle
 import numpy as np
 import ast
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-import matplotlib.pyplot as plt
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-from collections import deque
-import random
+import RLAgent_DQNModel
 
-# import px4_msgs
 """msgs for subscription"""
 from px4_msgs.msg import VehicleStatus
 from px4_msgs.msg import VehicleLocalPosition
 from px4_msgs.msg import VehicleGlobalPosition
 from px4_msgs.msg import VehicleAttitude
+from px4_msgs.msg import ActuatorOutputs
+from std_msgs.msg import String, Int32
+
 """msgs for publishing"""
 from px4_msgs.msg import VehicleCommand
 from px4_msgs.msg import OffboardControlMode
 from px4_msgs.msg import TrajectorySetpoint
 
-from std_msgs.msg import String
+class PID:
+    def __init__(self, Kp, Ki, Kd, dt):
+        self.Kp = Kp
+        self.Ki = Ki
+        self.Kd = Kd
+        self.dt = dt
+        self.integral = 0.0
+        self.prev_error = 0.0
 
-# Define neural network for Q-learning
-class DQNModel(nn.Module):
-    def __init__(self, state_size, action_size):
-        super(DQNModel, self).__init__()
-        self.fc1 = nn.Linear(state_size, 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.fc3 = nn.Linear(64, action_size)
-        
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return self.fc3(x)
-
-# Replay buffer for experience replay
-class ReplayBuffer:
-    def __init__(self, capacity):
-        self.buffer = deque(maxlen=capacity)
-    
-    def push(self, state, action, reward, next_state, done):
-        self.buffer.append((state, action, reward, next_state, done))
-    
-    def sample(self, batch_size):
-        return random.sample(self.buffer, batch_size)
-    
-    def __len__(self):
-        return len(self.buffer)
-
-class RLAgent:
-    def __init__(self, state_size, action_size, learning_rate=0.001, gamma=0.99):
-        self.state_size = state_size
-        self.action_size = action_size
-        self.gamma = gamma  # discount factor
-        self.epsilon = 1.0  # exploration rate
-        self.epsilon_min = 0.01
-        self.epsilon_decay = 0.995
-        self.batch_size = 32
-        self.learning_rate = learning_rate
-        
-        # Define action space (discretized)
-        self.forward_actions = np.linspace(-3.0, 3.0, 7)  # [-3, -2, -1, 0, 1, 2, 3]
-        self.lateral_actions = np.linspace(-0.5, 0.5, 5)  # [-0.5, -0.25, 0, 0.25, 0.5]
-        self.vertical_actions = np.linspace(-0.5, 0.5, 5)  # [-0.5, -0.25, 0, 0.25, 0.5]
-        
-        # Initialize networks
-        self.model = DQNModel(state_size, action_size)
-        self.target_model = DQNModel(state_size, action_size)
-        self.target_model.load_state_dict(self.model.state_dict())
-        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
-        
-        # Experience replay
-        self.memory = ReplayBuffer(10000)
-        
-        # Training parameters
-        self.update_target_every = 100
-        self.train_counter = 0
-        
-    def get_action(self, state):
-        """Select action according to epsilon-greedy policy"""
-        if np.random.rand() <= self.epsilon:
-            # Random action
-            action_idx = random.randrange(self.action_size)
-        else:
-            state_tensor = torch.FloatTensor(state).unsqueeze(0)
-            with torch.no_grad():
-                q_values = self.model(state_tensor)
-            action_idx = torch.argmax(q_values).item()
-        
-        # Convert action index to actual control values
-        action_space = self.action_size // 3  # Assuming equal divisions for each control
-        forward_idx = action_idx % 7
-        lateral_idx = (action_idx // 7) % 5
-        vertical_idx = (action_idx // 35) % 5
-        
-        return {
-            'forward': self.forward_actions[forward_idx],
-            'lateral': self.lateral_actions[lateral_idx],
-            'vertical': self.vertical_actions[vertical_idx],
-            'action_idx': action_idx
-        }
-    
-    def remember(self, state, action, reward, next_state, done):
-        """Store experience in memory"""
-        self.memory.push(state, action, reward, next_state, done)
-        
-    def train(self):
-        """Train the network using experience replay"""
-        if len(self.memory) < self.batch_size:
-            return
-        
-        # Sample a batch from memory
-        batch = self.memory.sample(self.batch_size)
-        states, actions, rewards, next_states, dones = zip(*batch)
-        
-        states = torch.FloatTensor(np.array(states))
-        actions = torch.LongTensor(actions)
-        rewards = torch.FloatTensor(rewards)
-        next_states = torch.FloatTensor(np.array(next_states))
-        dones = torch.FloatTensor(dones)
-        
-        # Current Q values
-        current_q = self.model(states).gather(1, actions.unsqueeze(1)).squeeze(1)
-        
-        # Target Q values
-        with torch.no_grad():
-            next_q = self.target_model(next_states).max(1)[0]
-        target_q = rewards + (1 - dones) * self.gamma * next_q
-        
-        # Compute loss and backpropagate
-        loss = F.mse_loss(current_q, target_q)
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-        
-        # Update target network if needed
-        self.train_counter += 1
-        if self.train_counter % self.update_target_every == 0:
-            self.target_model.load_state_dict(self.model.state_dict())
-        
-        # Decay epsilon
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
-            
-    def save_model(self, filepath):
-        """Save model weights"""
-        torch.save(self.model.state_dict(), filepath)
-        
-    def load_model(self, filepath):
-        """Load model weights"""
-        self.model.load_state_dict(torch.load(filepath))
-        self.target_model.load_state_dict(self.model.state_dict())
+    def update(self, error):
+        self.integral += error * self.dt
+        derivative = (error - self.prev_error) / self.dt
+        output = self.Kp * error + self.Ki * self.integral + self.Kd * derivative
+        self.prev_error = error
+        return output
 
 def enu_to_ned(enu_vec):
     return np.array([enu_vec[1], enu_vec[0], -enu_vec[2]])
 
-class IrisCameraControllerRL(Node):
+class IrisCameraController(Node):
     def __init__(self):
-        super().__init__('iris_camera_controller_rl')
+        super().__init__('iris_camera_controller')
 
         """
         0. Configure QoS profile for publishing and subscribing
@@ -187,8 +66,8 @@ class IrisCameraControllerRL(Node):
         self.vehicle_status_subscriber = self.create_subscription(
             VehicleStatus, '/px4_1/fmu/out/vehicle_status', self.vehicle_status_callback, qos_profile
         )
-        self.vehicle_pitch_subscriber = self.create_subscription(
-            VehicleAttitude, '/px4_1/fmu/out/vehicle_attitude', self.vehicle_pitch_callback, qos_profile
+        self.vehicle_pose_subscriber = self.create_subscription(
+            VehicleAttitude, '/px4_1/fmu/out/vehicle_attitude', self.roll_pitch_callback, qos_profile
         )
         self.vehicle_local_position_subscriber = self.create_subscription(
             VehicleLocalPosition, '/px4_1/fmu/out/vehicle_local_position', self.vehicle_local_position_callback, qos_profile
@@ -196,7 +75,14 @@ class IrisCameraControllerRL(Node):
         self.vehicle_global_position_subscriber = self.create_subscription(
             VehicleGlobalPosition, '/px4_1/fmu/out/vehicle_global_position', self.vehicle_global_position_callback, qos_profile
         )
-        self.yolo_detection_subscriber = self.create_subscription(String, '/yolov8/bounding_boxes', self.bbox_callback, qos_profile_yolo
+        self.motor_output_subscriber = self.create_subscription(
+            ActuatorOutputs, '/px4_1/fmu/out/actuator_outputs', self.motor_output_callback, qos_profile
+        )
+        self.yolo_detection_subscriber = self.create_subscription(
+            String, '/YOLOv8/bounding_boxes', self.bbox_callback, qos_profile_yolo
+        )
+        self.fastsam_detection_subscriber = self.create_subscription(
+            Int32, '/FastSAM/object_pixel_count', self.pixel_count_callback, qos_profile_yolo
         )
 
         """
@@ -219,8 +105,7 @@ class IrisCameraControllerRL(Node):
         self.vehicle_status = VehicleStatus()
         self.vehicle_attitude = VehicleAttitude()
         self.pos = np.array([0.0, 0.0, 0.0])
-        self.pos_gps = np.array([0.0, 0.0, 0.0]) 
-        self.vel = np.array([0.0, 0.0, 0.0])
+        self.pos_gps = np.array([0.0, 0.0, 0.0])
         self.yaw = 0.0
         self.pitch = 0.0
         self.home_position = np.array([0.0, 0.0, 0.0])
@@ -230,112 +115,84 @@ class IrisCameraControllerRL(Node):
         self.state = 'ready2flight' # ready2flight -> takeoff -> Tagging
 
         """
-        4. RL variables
+        4. PID variables
         """
         self.desired_distance = 3  # m
-        self.desired_bbox_area = self.distance2area(self.desired_distance)
-        self.image_center = np.array([320.0, 200.0])  # 640x480 image center
-        
-        # Define state and action spaces
-        state_size = 6  # [lateral_error, vertical_error, forward_error, vel_x, vel_y, vel_z]
-        action_size = 7 * 5 * 5  # Discretized actions for forward, lateral, vertical
-        self.rl_agent = RLAgent(state_size, action_size)
-        
-        # RL state variables
-        self.prev_state = None
-        self.prev_action = None
-        self.prev_action_idx = None
-        self.total_reward = 0
-        self.episode_step = 0
-        self.load_model_if_exists()
+        self.desired_bbox_area = self.Distance2BBoxArea(self.desired_distance)
+        self.desired_pixel_count = self.Distance2PixelCount(self.desired_distance)
+        self.image_center = np.array([320.0, 240.0])  # 640x480 이미지의 중심
 
-        # Latest bounding box data (None if not available)
+        # PID controller initialization
+        self.dt = 0.05
+        self.pid_forward = PID(Kp=1.5, Ki=0.0, Kd=0.0, dt=self.dt)
+        self.pid_lateral = PID(Kp=0.007, Ki=0.01, Kd=0.01, dt=self.dt)
+        self.pid_vertical = PID(Kp=2, Ki=0.0, Kd=0.1, dt=self.dt)
+
         self.latest_bbox = None
-        self.bbox_size_window = []  # Store recent 10 bbox areas
-        self.dt = 0.05  # Timer period
+        self.bbox_size_window = []  # 최근 10개의 bbox area를 저장하는 리스트
+        self.pixel_count_window = []  # 
 
         """
-        5. Error plot variables
+        5. variables for RL
         """
-        plt.ion()  # Interactive mode
-        self.fig, self.ax = plt.subplots(4, 1, figsize=(8, 8))
-        self.ax[0].set_title('Forward Error')
-        self.ax[1].set_title('Lateral Error')
-        self.ax[2].set_title('Vertical Error')
-        self.ax[3].set_title('Cumulative Reward')
-        self.ax[3].set_xlabel('Time (s)')
-        self.time_data = []
-        self.forward_error_data = []
-        self.lateral_error_data = []
-        self.vertical_error_data = []
-        self.reward_data = []
-        self.tagging_start_time = None  # Record tagging start time
-        fig_manager = plt.get_current_fig_manager()
-        if hasattr(fig_manager, 'window'):
-            fig_manager.window.setGeometry(3400, 1000, 700, 600)
+        self.agent = RLAgent_DQNModel.RLAgent()
+        self.agent.load_model("/home/gr/iris_tracker_PID_RL/weights/offline_train_from_expert_data/4.9158.pth")
+        self.agent.epsilon = 0.0  # 평가 시 랜덤성 제거
+
+        # """
+        # 5. Error plot variables
+        # """
+        # plt.ion()  # 인터랙티브 모드 활성화
+        # self.fig, self.ax = plt.subplots(3, 1, figsize=(6, 5))
+        # self.ax[0].set_title('Forward Error')
+        # self.ax[1].set_title('Lateral Error')
+        # self.ax[2].set_title('Vertical Error')
+        # self.ax[2].set_xlabel('Time (s)')
+        # self.time_data = []
+        # self.forward_error_data = []
+        # self.lateral_error_data = []
+        # self.vertical_error_data = []
+        # self.tagging_start_time = None  # Tagging 상태 시작 시각 기록용
+        # fig_manager = plt.get_current_fig_manager()
+        # fig_manager.window.setGeometry(3400, 1000, 700, 450)  # (X, Y, Width, Height)
+
+        # """
+        # 5.1. Distance-Area plot variables
+        # """
+        # self.fig, self.ax = plt.subplots(1, 1, figsize=(6, 5))
+        # self.ax.set_title('Pixel Count')
+        # self.csv_filename = "pixel_count_log.csv"
+        # self.csv_file = open(self.csv_filename, mode='w', newline='')
+        # self.csv_writer = csv.writer(self.csv_file)
+        # self.csv_writer.writerow(["Time (s)", "Pixel count"])
 
         """
         6. Timer setup
         """
-        self.offboard_heartbeat = self.create_timer(0.05, self.offboard_heartbeat_callback) # 20Hz 
-        self.main_timer = self.create_timer(0.05, self.main_callback) # 20Hz
-        self.train_timer = self.create_timer(0.5, self.train_callback) # 2Hz
+        self.offboard_heartbeat = self.create_timer(0.02, self.offboard_heartbeat_callback) # 50Hz 
+        self.main_timer = self.create_timer(0.1, self.main_callback) # 10Hz
 
-        self.get_logger().info("Iris Camera Controller with RL initialized")
-
-    def load_model_if_exists(self):
-        model_path = "drone_rl_model.pth"
-        if os.path.exists(model_path):
-            try:
-                self.rl_agent.load_model(model_path)
-                self.get_logger().info(f"Loaded RL model from {model_path}")
-                # Reduce epsilon to use more exploitation than exploration
-                self.rl_agent.epsilon = 0.1
-            except Exception as e:
-                self.get_logger().error(f"Failed to load model: {e}")
-        else:
-            self.get_logger().info("No pretrained model found - starting with new model")
+        """
+        7. Node parameter
+        """
+        self.declare_parameter('mode', 'bbox')
+        self.control_mode = self.get_parameter('mode').get_parameter_value().string_value
 
     """
     Helper Functions
     """ 
-    def distance2area(self, distance):
-        """Exponential relationship between distance and bounding box area"""
+    def Distance2BBoxArea(self, distance):
         return 79162.49 * np.exp(-0.94 * distance) + 2034.21 # fitting result
     
-    def area2distance(self, area):
-        """Convert bounding box area to distance"""
-        return min(-1/0.94 * math.log((area-2034.21)/79162.49), 7)
+    def BBoxArea2Distance(self, bbox_area):
+        bbox_area = max(2034.30, bbox_area)
+        return min(-1/0.94 * math.log((bbox_area-2034.21)/79162.49), 20)
 
-    def normalized_forward_error(self, distance, forward_error):
-        """Convert area error to distance error"""
-        dA_dd = -0.94 * 79162.49 * np.exp(-0.94 * distance) # derivative of distance2area function
-        normalized_error = -forward_error / dA_dd # convert area error to distance error
-        return normalized_error
-
-    def compute_reward(self, errors, actions):
-        """Compute reward based on tracking errors and control actions"""
-        lateral_error, vertical_error, forward_error = errors
-        
-        # Target region - higher reward for getting close to target
-        target_reward = 0
-        if abs(lateral_error) < 30 and abs(vertical_error) < 30 and abs(forward_error) < 0.5:
-            target_reward = 10.0
-        elif abs(lateral_error) < 60 and abs(vertical_error) < 60 and abs(forward_error) < 1.0:
-            target_reward = 5.0
-            
-        # Error penalties - penalize being far from target
-        lateral_penalty = -0.01 * abs(lateral_error)
-        vertical_penalty = -0.01 * abs(vertical_error)
-        forward_penalty = -1.0 * abs(forward_error)
-        
-        # Action penalties - penalize large control inputs
-        action_penalty = -0.1 * (abs(actions['forward']) + abs(actions['lateral']) + abs(actions['vertical']))
-        
-        # Smoothness penalties - penalize jerky movements
-        reward = target_reward + lateral_penalty + vertical_penalty + forward_penalty + action_penalty
-        
-        return reward
+    def Distance2PixelCount(self, distance):
+        return 6941.21 / (distance**2)
+    
+    def PixelCount2Distance(self, pixel_count):
+        return min(math.sqrt(6941.21 / pixel_count), 20)
 
     def set_home_position(self):
         """Convert global GPS coordinates to local coordinates relative to home position"""     
@@ -367,29 +224,46 @@ class IrisCameraControllerRL(Node):
         self.home_position_gps = np.array([lat1, lon1, alt1])
         return self.home_position    
 
-    def update_error_plot(self, time, forward_error, lateral_error, vertical_error, reward):
+    def update_error_plot(self, time, forward_error, lateral_error, vertical_error):
         self.time_data.append(time)
         self.forward_error_data.append(forward_error)
         self.lateral_error_data.append(lateral_error)
         self.vertical_error_data.append(vertical_error)
-        self.reward_data.append(self.total_reward)
 
         self.ax[0].clear()
         self.ax[1].clear()
         self.ax[2].clear()
-        self.ax[3].clear()
         
         self.ax[0].plot(self.time_data, self.forward_error_data, label='Forward Error', color='red')
         self.ax[1].plot(self.time_data, self.lateral_error_data, label='Lateral Error', color='green')
         self.ax[2].plot(self.time_data, self.vertical_error_data, label='Vertical Error', color='blue')
-        self.ax[3].plot(self.time_data, self.reward_data, label='Cumulative Reward', color='purple')
 
         self.ax[0].legend()
         self.ax[1].legend()
         self.ax[2].legend()
-        self.ax[3].legend()
-        self.ax[3].set_xlabel('Time (s)')
+        self.ax[2].set_xlabel('Time (s)')
         
+        self.fig.canvas.draw()
+        self.fig.canvas.flush_events()
+
+    def update_area_plot(self, time, area):
+        self.time_data.append(time)
+        self.area_data.append(area)
+
+        self.csv_writer.writerow([time, area])
+        self.csv_file.flush()
+
+        if hasattr(self, 'area_line'):
+            self.area_line.set_xdata(self.time_data)
+            self.area_line.set_ydata(self.area_data)
+        else:
+            self.area_line, = self.ax.plot(self.time_data, self.area_data, label='Pixel count', color='red')
+
+        self.ax.relim()
+        self.ax.autoscale_view()
+        self.ax.legend()
+        self.ax.set_xlabel('Time (s)')
+
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
 
@@ -401,9 +275,36 @@ class IrisCameraControllerRL(Node):
         std_area = np.std(arr)
         inliers = arr[(arr >= mean_area - 2 * std_area) & (arr <= mean_area + 2 * std_area)] # remove outliers
         if len(inliers) == 0:
-            return mean_area  # If all are outliers, use the overall mean
+            return mean_area  # 모두 outlier면 그냥 전체 평균 사용
         else:
             return np.mean(inliers)
+        
+    def get_filtered_pixel_count(self):
+        if len(self.pixel_count_window) == 0:
+            return 0
+        arr = np.array(self.pixel_count_window)
+        mean_count = np.mean(arr)
+        std_count = np.std(arr)
+        inliers = arr[(arr >= mean_count - 2 * std_count) & (arr <= mean_count + 2 * std_count)] # remove outliers
+        if len(inliers) == 0:
+            return mean_count  # 모두 outlier면 그냥 전체 평균 사용
+        else:
+            return np.mean(inliers)
+
+    def VerticalError2RelativeAltitude(self, error_vertical, distance, vertical_fov=1.123):
+        angle_per_pixel = vertical_fov / 480
+        angle_offset = error_vertical * angle_per_pixel
+        total_angle = self.pitch + angle_offset
+        return distance * math.sin(total_angle)
+
+    def get_action_idx_from_corrections(self, correction_vertical, correction_forward, correction_yaw, 
+                                        vertical_action_space, forward_action_space, yaw_action_space):
+        vertical_idx = int(np.abs(vertical_action_space - correction_vertical).argmin())
+        forward_idx  = int(np.abs(forward_action_space - correction_forward).argmin())
+        yaw_idx      = int(np.abs(yaw_action_space - correction_yaw).argmin())
+        action_idx = vertical_idx + forward_idx * len(vertical_action_space) + yaw_idx * (len(vertical_action_space) * len(forward_action_space))
+        
+        return action_idx
 
     """
     Callback functions for subscribers.
@@ -411,19 +312,17 @@ class IrisCameraControllerRL(Node):
     def vehicle_status_callback(self, msg):
         """Callback function for vehicle_status topic subscriber."""
         self.vehicle_status = msg
-
-    def vehicle_pitch_callback(self, msg):
+    
+    def roll_pitch_callback(self, msg):
         self.vehicle_attitude = msg
         w, x, y, z = msg.q[0], msg.q[1], msg.q[2], msg.q[3]
-        t = +2.0 * (w * y - z * x)
-        t = +1.0 if t > +1.0 else t
-        t = -1.0 if t < -1.0 else t
-        self.pitch = math.asin(t)
+
+        self.pitch = math.atan2(2.0 * (w * y - z * x), math.sqrt(1 - (2.0 * (w * y - z * x))**2))
+        self.roll = math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
 
     def vehicle_local_position_callback(self, msg): # NED
         self.vehicle_local_position = msg
         self.pos = np.array([msg.x, msg.y, msg.z])
-        self.vel = np.array([msg.vx, msg.vy, msg.vz])
         self.yaw = msg.heading
 
     def vehicle_global_position_callback(self, msg):
@@ -445,24 +344,47 @@ class IrisCameraControllerRL(Node):
                     self.bbox_size_window.append(area)
                     if len(self.bbox_size_window) > 10:
                         self.bbox_size_window.pop(0)
+                    if self.state == 'Tagging':
+                        print("YOLO detected")
             else:
-                # Keep existing data if no detection
-                self.get_logger().warn("YOLO detection lost, using last detected bounding box.")
+                self.latest_bbox = None
+                if self.state == 'Tagging':
+                    print("YOLO detection lost")
         except Exception as e:
-            self.get_logger().error("Failed to parse bounding box: " + str(e))
+            print("Failed to parse bounding box: " + str(e))
+
+    def pixel_count_callback(self, msg):
+        if msg.data == 0:
+            self.pixel_count = None
+        else:
+            self.pixel_count = msg.data
+
+            self.pixel_count_window.append(self.pixel_count)
+            if len(self.pixel_count_window) > 10:
+                self.pixel_count_window.pop(0)
+
+            if self.state == 'Tagging':
+                print(f"FastSAM pixel count received: {self.pixel_count}")
+
+    def motor_output_callback(self, msg):
+        self.motor_values = msg.output[:4]  # 쿼드로터 기준 motor 0~3
+        print(f"[M0: {self.motor_values[0]:.2f}, M1: {self.motor_values[1]:.2f}, M2: {self.motor_values[2]:.2f}, M3: {self.motor_values[3]:.2f}")
 
     """
     Callback functions for timers
     """
     def offboard_heartbeat_callback(self):
         """offboard heartbeat signal"""
-        self.publish_offboard_control_mode(position=True)
-    
-    def train_callback(self):
-        """Train the RL model periodically"""
-        if self.prev_state is not None and self.prev_action_idx is not None:
-            self.rl_agent.train()
-            
+        # Log the current time delta from the last call to monitor timing consistency
+        current_time = self.get_clock().now()
+        if hasattr(self, 'last_heartbeat_time'):
+            delta = (current_time - self.last_heartbeat_time).nanoseconds / 1e9
+            if delta > 0.06:  # More than 60ms between heartbeats
+                self.get_logger().warn(f"Heartbeat delay detected: {delta:.3f}s")
+        self.last_heartbeat_time = current_time
+        
+        self.publish_offboard_control_mode(position=True, direct_actuator=True)
+
     def main_callback(self):
         if self.state == 'ready2flight':
             if self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_AUTO_LOITER:
@@ -486,9 +408,6 @@ class IrisCameraControllerRL(Node):
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0, target_system=2)
                 self.state = 'Tagging'
                 self.tagging_start_time = self.get_clock().now().nanoseconds * 1e-9
-                # Reset episode variables
-                self.total_reward = 0
-                self.episode_step = 0
 
         if self.state == 'Tagging':
             error_lateral = 0.0
@@ -497,72 +416,57 @@ class IrisCameraControllerRL(Node):
 
             if self.latest_bbox is not None:
                 bbox_center = self.latest_bbox['center']
-                filtered_bbox_area = self.get_filtered_bbox_area()
-                
-                error_lateral = (self.image_center[0] - bbox_center[0])
-                error_vertical = (self.image_center[1] - bbox_center[1]) - self.pitch/0.5615 * 240
-                error_forward = self.normalized_forward_error(self.area2distance(filtered_bbox_area), self.desired_bbox_area - filtered_bbox_area)
 
-                # Create state vector for RL
-                current_state = np.array([
-                    error_lateral, 
-                    error_vertical, 
-                    error_forward,
-                    self.vel[0], 
-                    self.vel[1], 
-                    self.vel[2]
-                ])
-                
-                # Get action from RL agent
-                action_dict = self.rl_agent.get_action(current_state)
-                forward_action = action_dict['forward']
-                lateral_action = action_dict['lateral']
-                vertical_action = action_dict['vertical']
-                action_idx = action_dict['action_idx']
-                
-                # Calculate reward for previous action if we have a previous state
-                if self.prev_state is not None and self.prev_action is not None:
-                    reward = self.compute_reward([error_lateral, error_vertical, error_forward], self.prev_action)
-                    self.total_reward += reward
-                    self.rl_agent.remember(self.prev_state, self.prev_action_idx, reward, current_state, False)
-                    
-                # Save current state and action for next iteration
-                self.prev_state = current_state
-                self.prev_action = action_dict
-                self.prev_action_idx = action_idx
-                self.episode_step += 1
-                
-                # Log info
-                current_time = self.get_clock().now().nanoseconds * 1e-9 - self.tagging_start_time
-                self.update_error_plot(current_time, error_forward, error_lateral, error_vertical, self.total_reward)
-                
-                self.get_logger().info(f"Action: forward={forward_action:.2f}, lateral={lateral_action:.2f}, vertical={vertical_action:.2f}")
-                self.get_logger().info(f"Reward: {self.total_reward:.2f}, Epsilon: {self.rl_agent.epsilon:.2f}")
-                
-                # Apply action
-                new_yaw = self.yaw - lateral_action
-                
-                yaw_rad = np.radians(self.yaw)
-                cos_yaw = np.cos(yaw_rad)
-                sin_yaw = np.sin(yaw_rad)
-                
-                x_enu = cos_yaw * forward_action - sin_yaw * 0
-                y_enu = sin_yaw * forward_action + cos_yaw * 0
-                
-                local_enu_setpoint = np.array([x_enu, y_enu, vertical_action])
+                if self.control_mode == 'bbox':
+                    filtered_bbox_area = self.get_filtered_bbox_area()
+                    error_lateral = (self.image_center[0] - bbox_center[0])
+                    error_vertical = self.VerticalError2RelativeAltitude(self.image_center[1] - bbox_center[1], self.BBoxArea2Distance(filtered_bbox_area))
+                    error_forward = self.BBoxArea2Distance(filtered_bbox_area) - self.desired_distance
+                elif self.control_mode == 'pixel' and self.get_filtered_pixel_count() > 10:
+                    filtered_pixel_count = self.get_filtered_pixel_count()
+                    error_lateral = (self.image_center[0] - bbox_center[0])
+                    error_vertical = self.VerticalError2RelativeAltitude(self.image_center[1] - bbox_center[1], self.PixelCount2Distance(filtered_pixel_count))
+                    error_forward = self.PixelCount2Distance(filtered_pixel_count) - self.desired_distance
+                else:
+                    target_ned = np.array([0.0, 0.0, -10.0])
+                    self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
+                    print(f"Go to origin")
+                    return
+
+                print(f"  ver_E: {error_vertical:.2f},   lat_E: {error_lateral:.2f},   for_E: {error_forward:.2f}")
+
+                state = np.array([error_vertical, error_forward, error_lateral], dtype=np.float32)
+                action = self.agent.get_action(state)
+
+                correction_vertical = action['cor_ver']
+                correction_forward = action['cor_for']
+                correction_yaw = action['cor_yaw']
+
+                print(f"ver_cor: {correction_vertical:.2f}, lat_cor: {correction_yaw:.2f}, for_cor: {correction_forward:.2f}")
+
+                new_yaw = self.yaw - correction_yaw
+
+                east_error = np.sin(self.yaw) * correction_forward
+                north_error = np.cos(self.yaw) * correction_forward
+
+                local_enu_setpoint = np.array([east_error, north_error, correction_vertical])
                 local_ned_setpoint = self.pos + enu_to_ned(local_enu_setpoint)
                 self.publish_setpoint(setpoint=local_ned_setpoint, yaw_sp=new_yaw)
-                
-                # Save model periodically
-                if self.episode_step % 500 == 0:
-                    self.rl_agent.save_model("drone_rl_model.pth")
-                    self.get_logger().info("Model saved")
+
             else:
-                self.get_logger().info("No detection received.")
-                enu_setpoint = np.array([0, 0, 0])
-                ned_setpoint = self.pos + enu_to_ned(enu_setpoint)
-                new_yaw = self.yaw - 0
-                self.publish_setpoint(setpoint=ned_setpoint, yaw_sp=new_yaw)
+                """
+                Missing state policy
+                """
+                ### go to origin
+
+                target_ned = np.array([0.0, 0.0, -10.0])
+                self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
+                print(f"Go to origin")
+
+            # current_time = self.get_clock().now().nanoseconds * 1e-9 - self.tagging_start_time
+            # self.update_error_plot(current_time, error_forward, error_lateral, error_vertical)
+            # self.publish_local2global_setpoint(local_setpoint=np.array([0, 0, -5]))
+            # self.update_area_plot(current_time, self.pixel_count)
 
     """
     Functions for publishing topics.
@@ -621,18 +525,14 @@ class IrisCameraControllerRL(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = IrisCameraControllerRL()
+    node = IrisCameraController()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        print("KeyboardInterrupt received. Exiting and keeping plot window open...")
-        # Save the model before exiting
-        node.rl_agent.save_model("drone_rl_model.pth")
-        print("Model saved to drone_rl_model.pth")
+        print("KeyboardInterrupt received.")
     finally:
         node.destroy_node()
         rclpy.shutdown()
-        plt.show(block=True)  # Keep plot window open after program exit
 
 if __name__ == '__main__':
     main()

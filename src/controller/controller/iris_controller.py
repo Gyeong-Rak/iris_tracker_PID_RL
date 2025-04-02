@@ -326,10 +326,12 @@ class iris_controller(Node):
     def random_waypoint_trajectory(self):
         now = self.get_clock().now().nanoseconds * 1e-9
         t = now - self.start_time
+
+        if t < 10: return # wait for iris_camera to be ready
         
         if not hasattr(self, 'next_waypoint_time') or t >= self.next_waypoint_time:
             self.next_waypoint_time = t + 0.01
-            speed = 0.4
+            speed = 0.2
             if hasattr(self, 'current_waypoint'):
                 delta = np.array([
                     random.uniform(-speed, speed),  # dx
@@ -340,8 +342,8 @@ class iris_controller(Node):
                 new_waypoint = self.current_waypoint + delta
                 self.current_waypoint = np.clip(
                     new_waypoint,
-                    [-10.0, -10.0, -15.0],  # 최소값 (x, y, z)
-                    [10.0, 10.0, -5.0]      # 최대값 (x, y, z)
+                    [-5.0, -5.0, -10.5],  # 최소값 (x, y, z)
+                    [5.0, 5.0, -9.5]      # 최대값 (x, y, z)
                 )
             else:
                 self.current_waypoint = self.pos

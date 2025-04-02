@@ -3,6 +3,7 @@ import rclpy
 from rclpy.node import Node
 import numpy as np
 import math, os, ast
+from pathlib import Path
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 import RLAgent_DQNModel
 
@@ -17,7 +18,10 @@ from std_msgs.msg import String, Int32
 from px4_msgs.msg import VehicleCommand
 from px4_msgs.msg import OffboardControlMode
 from px4_msgs.msg import TrajectorySetpoint
-from px4_msgs.msg import ActuatorMotors
+# from px4_msgs.msg import ActuatorMotors
+
+def enu_to_ned(enu_vec):
+    return np.array([enu_vec[1], enu_vec[0], -enu_vec[2]])
 
 class RLtraining(Node):
     def __init__(self):
@@ -46,7 +50,7 @@ class RLtraining(Node):
         self.vehicle_status_subscriber = self.create_subscription(
             VehicleStatus, '/px4_1/fmu/out/vehicle_status', self.vehicle_status_callback, qos_profile
         )
-        self.vehicle_pitch_subscriber = self.create_subscription(
+        self.vehicle_pose_subscriber = self.create_subscription(
             VehicleAttitude, '/px4_1/fmu/out/vehicle_attitude', self.roll_pitch_callback, qos_profile
         )
         self.vehicle_local_position_subscriber = self.create_subscription(
@@ -74,9 +78,9 @@ class RLtraining(Node):
         self.trajectory_setpoint_publisher = self.create_publisher(
             TrajectorySetpoint, '/px4_1/fmu/in/trajectory_setpoint', qos_profile
         )
-        self.motor_command_publisher = self.create_publisher(
-            ActuatorMotors, '/px4_1/fmu/in/actuator_motors', qos_profile
-        )
+        # self.motor_command_publisher = self.create_publisher(
+        #     ActuatorMotors, '/px4_1/fmu/in/actuator_motors', qos_profile
+        # )
 
         """
         3. Status variables
@@ -88,9 +92,11 @@ class RLtraining(Node):
         self.pos_gps = np.array([0.0, 0.0, 0.0])
         self.roll = 0.0
         self.pitch = 0.0
+        self.yaw = 0.0
         self.home_position = np.array([0.0, 0.0, 0.0])
         self.home_position_gps = np.array([0.0, 0.0, 0.0])
         self.get_position_flag = False
+        self.current_offboard_mode = {'direct_actuator': True, 'position': False}
 
         # Vehicle state
         self.state = 'ready2flight' # ready2flight -> takeoff -> Tagging
@@ -104,8 +110,10 @@ class RLtraining(Node):
         self.image_center = np.array([320.0, 200.0])  # 640x480 이미지의 중심
 
         self.latest_bbox = None
+        self.last_bbox_time = 0.0
         self.bbox_size_window = []  # 최근 10개의 bbox area를 저장하는 리스트
         self.pixel_count_window = []
+
 
         """
         4. Timer setup
@@ -236,16 +244,17 @@ class RLtraining(Node):
                     center = np.array([(x1 + x2) / 2.0, (y1 + y2) / 2.0])
                     area = (x2 - x1) * (y2 - y1)
                     self.latest_bbox = {'center': center, 'area': area, 'timestamp': self.get_clock().now().nanoseconds * 1e-9}
+                    self.last_bbox_time = self.get_clock().now().nanoseconds * 1e-9
 
                     self.bbox_size_window.append(area)
                     if len(self.bbox_size_window) > 10:
                         self.bbox_size_window.pop(0)
-                    if self.state == 'Tagging':
-                        print("YOLO detected")
+                    # if self.state == 'Tagging':
+                    #     # print("YOLO detected")
             else:
                 self.latest_bbox = None
-                if self.state == 'Tagging':
-                    print("YOLO detection lost")
+                # if self.state == 'Tagging':
+                #     print("YOLO detection lost")
         except Exception as e:
             print("Failed to parse bounding box: " + str(e))
 
@@ -259,8 +268,8 @@ class RLtraining(Node):
             if len(self.pixel_count_window) > 10:
                 self.pixel_count_window.pop(0)
 
-            if self.state == 'Tagging':
-                print(f"FastSAM pixel count received: {self.pixel_count}")
+            # if self.state == 'Tagging':
+                # print(f"FastSAM pixel count received: {self.pixel_count}")
 
     """
     Callback functions for timers
@@ -271,11 +280,11 @@ class RLtraining(Node):
         current_time = self.get_clock().now()
         if hasattr(self, 'last_heartbeat_time'):
             delta = (current_time - self.last_heartbeat_time).nanoseconds / 1e9
-            if delta > 0.06:  # More than 60ms between heartbeats
+            if delta > 1.0:  # More than 60ms between heartbeats
                 self.get_logger().warn(f"Heartbeat delay detected: {delta:.3f}s")
         self.last_heartbeat_time = current_time
         
-        self.publish_offboard_control_mode(position=True)
+        self.publish_offboard_control_mode(**self.current_offboard_mode)
 
     def main_callback(self):
         if self.control_mode not in ['bbox', 'pixel']:
@@ -285,7 +294,7 @@ class RLtraining(Node):
         if self.state == 'ready2flight':
             if self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_AUTO_LOITER:
                 if self.vehicle_status.arming_state == VehicleStatus.ARMING_STATE_DISARMED:
-                    print("Irisstart_training.py를 실행하면 모델 학습이 잘 될 지, 꽁꽁히판단해줘. Camera Arming...")
+                    print("Camera Arming...")
                     self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0, target_system=2)
                 else:
                     self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_TAKEOFF, param7=10.0, target_system=2)
@@ -294,7 +303,7 @@ class RLtraining(Node):
                     print("Waiting for position data")
                     return
                 self.home_position = self.set_home_position()
-                self.get_logger().info(f"Home position set to: [{self.home_position[0]:.2f}, {self.home_position[1]:.2f}, {self.home_position[2]:.2f}]")
+                print(f"Home position set to: [{self.home_position[0]:.2f}, {self.home_position[1]:.2f}, {self.home_position[2]:.2f}]")
                 print("Iris Camera Taking off...")
                 self.state = 'takeoff'
         
@@ -309,9 +318,29 @@ class RLtraining(Node):
             error_lateral = 0.0
             error_vertical = 0.0
             error_forward = 0.0
+
+            current_time = self.get_clock().now().nanoseconds * 1e-9
+            # print(f"missing time: {current_time - self.last_bbox_time:.2f}")
+            done_episode = current_time - self.last_bbox_time > 10.0
+
+            if done_episode:
+                if self.episode_number == self.max_episodes:
+                    model_name = f"RL_model_final_episode{self.episode_number}.pth"
+                    self.agent.save_model(model_name)
+                    self.get_logger().info(f"Training complete. Model saved. Total episodes: {self.episode_number}")
+                elif self.episode_number % 10 == 0:
+                    model_name = f"RL_model_episode{self.episode_number}.pth"
+                    self.agent.save_model(model_name)
+                    self.get_logger().info(f"Model saved. Current episodes: {self.episode_number}")
+
+                model_name = "RL_model_temp.pth"
+                self.agent.save_model(model_name)
+                Path("/tmp/rl_episode_done.flag").touch()
+                rclpy.shutdown()
+                return
             
             if not hasattr(self, 'rl_initialized'):
-                self.agent = RLAgent_DQNModel.RLAgent(learning_rate=0.001, gamma=0.99)
+                self.agent = RLAgent_DQNModel.RLAgent(learning_rate=0.001, gamma=0.99, epsilon_decay=0.995)
                 self.state_size = self.agent.state_size
                 self.action_size = self.agent.action_size
                 self.episode_steps = 0
@@ -319,12 +348,12 @@ class RLtraining(Node):
                 self.last_step_state = None
                 self.last_step_action_idx = None
                 
-                if os.path.exists("RL_model_temp.pth"):
-                    self.agent.load_model("RL_model_temp.pth")
-                    self.get_logger().info("Loaded existing RL model")
+                if os.path.exists("temp.pth"):
+                    self.agent.load_model("temp.pth")
+                    print("Loaded existing RL model")
                 
                 self.rl_initialized = True
-                self.get_logger().info("RL training initialized")
+                print("RL training initialized")
                 return
             
             if self.latest_bbox is not None:
@@ -333,47 +362,49 @@ class RLtraining(Node):
                 filtered_pixel_count = self.get_filtered_pixel_count()
                 
                 if self.control_mode == 'bbox':
+                    self.current_offboard_mode = {'direct_actuator': False, 'position': True}
                     error_lateral = (self.image_center[0] - bbox_center[0])
                     error_vertical = self.VerticalError2RelativeAltitude(self.image_center[1] - bbox_center[1], self.BBoxArea2Distance(filtered_bbox_area))
                     error_forward = self.BBoxArea2Distance(filtered_bbox_area) - self.desired_distance
                 elif self.control_mode == 'pixel':
                     if 10 < filtered_pixel_count <15000:
+                        self.current_offboard_mode = {'direct_actuator': False, 'position': True}
                         error_lateral = (self.image_center[0] - bbox_center[0])
                         error_vertical = self.VerticalError2RelativeAltitude(self.image_center[1] - bbox_center[1], self.PixelCount2Distance(filtered_pixel_count))
                         error_forward = self.PixelCount2Distance(filtered_pixel_count) - self.desired_distance
                     else:
+                        self.current_offboard_mode = {'direct_actuator': False, 'position': True}
                         target_ned = np.array([0.0, 0.0, -10.0])
                         self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
-                        print(f"Go to origin")
+                        # print(f"Go to origin")
                         return
                 
-                current_step_state = np.array([
-                    error_lateral,
-                    error_vertical,
-                    error_forward,
-                    self.roll,
-                    self.pitch
-                ])
+                current_step_state = np.array([error_lateral, error_vertical, error_forward])
                 
-                current_time = self.get_clock().now().nanoseconds * 1e-9
-                done_episode = current_time - self.latest_bbox['timestamp'] > 3.0
-                reward = self.agent.compute_reward(error_lateral, error_vertical, error_forward, self.roll, self.pitch)
+                reward = self.agent.compute_reward(error_lateral, error_vertical, error_forward)
                 
                 if self.last_step_state is not None and self.last_step_action_idx is not None:
                     self.agent.remember(self.last_step_state, self.last_step_action_idx, reward, current_step_state, done_episode)
                     self.episode_rewards.append(reward)
                 
                 action_dict = self.agent.get_action(current_step_state)
-                self.last_step_action = [
-                    action_dict['motor0'],
-                    action_dict['motor1'],
-                    action_dict['motor2'],
-                    action_dict['motor3']
-                ]
+                correction_vertical = action_dict['cor_ver']
+                correction_forward = action_dict['cor_for']
+                correction_yaw = action_dict['cor_yaw']
                 self.last_step_action_idx = action_dict['action_idx']
                 self.last_step_state = current_step_state
-                
-                self.publish_motor_command(self.last_step_action)
+
+                if len(self.agent.memory) < self.agent.batch_size:
+                    self.publish_setpoint(local_setpoint=[0.0, 0.0, 0.0])
+                    print("wait for minimum step")
+                else:
+                    new_yaw = self.yaw - correction_yaw
+                    east_error = np.sin(self.yaw) * correction_forward
+                    north_error = np.cos(self.yaw) * correction_forward
+
+                    local_enu_setpoint = np.array([east_error, north_error, correction_vertical])
+                    local_ned_setpoint = self.pos + enu_to_ned(local_enu_setpoint)
+                    self.publish_setpoint(setpoint=local_ned_setpoint, yaw_sp=new_yaw)
                 
                 self.agent.train()
                 
@@ -381,26 +412,13 @@ class RLtraining(Node):
 
                 if self.episode_steps % 100 == 0:
                     avg_reward = sum(self.episode_rewards) / len(self.episode_rewards) if self.episode_rewards else 0
-                    self.get_logger().info(f"Step: {self.episode_steps}, Avg Reward: {avg_reward:.2f}")
-                    
-                if done_episode:
-                    model_name = "RL_model_temp.pth"
-                    self.agent.save_model(model_name)
-
-                    if self.episode_number == self.max_episodes:
-                        model_name = f"RL_model_final_episode{self.episode_number}.pth"
-                        self.agent.save_model(model_name)
-                        self.get_logger().info(f"Training complete. Model saved. Total episodes: {self.episode_number}")
-                        rclpy.shutdown()
-                    elif self.episode_number % 10 == 0:
-                        model_name = f"RL_model_episode{self.episode_number}.pth"
-                        self.agent.save_model(model_name)
-                        self.get_logger().info(f"Model saved. Current episodes: {self.episode_number}")
-                        return
+                    print(f"Step: {self.episode_steps}, Avg Reward: {avg_reward:.2f}, Epsilon: {self.agent.epsilon:.2f}")
+                
             else:
+                self.current_offboard_mode = {'direct_actuator': False, 'position': True}
                 target_ned = np.array([0.0, 0.0, -10.0])
                 self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
-                print(f"Go to origin")
+                # print(f"Go to origin")
 
     """
     Functions for publishing topics.
@@ -436,17 +454,14 @@ class RLtraining(Node):
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.offboard_control_mode_publisher.publish(msg)
 
-    def publish_offboard_control_mode(self, **kwargs):
-        msg = OffboardControlMode()
-        msg.position = kwargs.get("position", False)
-        msg.velocity = kwargs.get("velocity", False)
-        msg.acceleration = kwargs.get("acceleration", False)
-        msg.attitude = kwargs.get("attitude", False)
-        msg.body_rate = kwargs.get("body_rate", False)
-        msg.thrust_and_torque = kwargs.get("thrust_and_torque", False)
-        msg.direct_actuator = kwargs.get("direct_actuator", False)
+    def publish_setpoint(self, **kwargs):
+        msg = TrajectorySetpoint()
+        setpoint = kwargs.get("setpoint", np.nan * np.zeros(3))
+        msg.position = list(setpoint)
+        msg.velocity = list(kwargs.get("velocity_sp", np.nan * np.zeros(3)))
+        msg.yaw = kwargs.get("yaw_sp", float('nan'))
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        self.offboard_control_mode_publisher.publish(msg)
+        self.trajectory_setpoint_publisher.publish(msg)
 
     def publish_local2global_setpoint(self, **kwargs):
         msg = TrajectorySetpoint()
@@ -460,18 +475,17 @@ class RLtraining(Node):
         self.get_logger().debug(f"Global setpoint: {global_setpoint}")
         self.trajectory_setpoint_publisher.publish(msg)
 
-    def publish_motor_command(self, motor_values):
-        msg = ActuatorMotors()
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        msg.timestamp_sample = msg.timestamp
-        msg.reversible_flags = 0  # 일반적인 쿼드로터에서는 0
+    # def publish_motor_command(self, motor_values):
+    #     msg = ActuatorMotors()
+    #     msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+    #     msg.timestamp_sample = msg.timestamp
+    #     msg.reversible_flags = 0  # 일반적인 쿼드로터에서는 0
 
-        # 12개 값 중 첫 4개 값만 사용, 나머지는 NaN
-        full_motor_values = np.full(12, np.nan, dtype=np.float32)
-        full_motor_values[:4] = motor_values  # 모터 0~3에 값 설정
+    #     full_motor_values = np.full(12, np.nan, dtype=np.float32)
+    #     full_motor_values[:4] = motor_values  # [FL BR BL FR]
 
-        msg.control = full_motor_values.tolist()
-        self.motor_command_publisher.publish(msg)
+    #     msg.control = full_motor_values.tolist()
+    #     self.motor_command_publisher.publish(msg)
 
 def main(args=None):
     rclpy.init(args=args)

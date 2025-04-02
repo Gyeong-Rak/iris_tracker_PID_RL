@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 from collections import deque
 import random
-import os
+import os, pickle
 
 # Define neural network to predect Q values
 # Input: current state  (size: state_size)
@@ -13,14 +13,26 @@ import os
 class DQNModel(nn.Module):
     def __init__(self, state_size, action_size):
         super(DQNModel, self).__init__()
-        self.fc1 = nn.Linear(state_size, 64) # fully connected layer, state_size -> 64 neurons
-        self.fc2 = nn.Linear(64, 64)
-        self.fc3 = nn.Linear(64, action_size)
+        self.net = nn.Sequential(
+            nn.Linear(state_size, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, action_size)
+        )
         
     def forward(self, x):
-        x = F.relu(self.fc1(x)) # forward using Rectified Linear Unit
-        x = F.relu(self.fc2(x))
-        return self.fc3(x) # there is no activation function at output layer. because outputs are not possibilities but expected values
+        return self.net(x)
 
 # Replay buffer for experience replay
 class ReplayBuffer:
@@ -37,20 +49,24 @@ class ReplayBuffer:
         return len(self.buffer)
 
 class RLAgent:
-    def __init__(self, learning_rate=0.001, gamma=0.99):
-        self.state_size = 5
+    def __init__(self, learning_rate=0.0001, gamma=0.99, epsilon_decay = 0.999):
+        self.state_size = 3
 
-        self.gamma = gamma  # discount factor
-        self.epsilon = 1.0  # exploration rate
+        self.gamma = gamma
+        self.epsilon = 1.0
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.99
+        self.epsilon_decay = epsilon_decay
         self.batch_size = 32
         self.learning_rate = learning_rate
         
         # Define action space
-        self.motor_action_space = np.linspace(0.0, 1.0, 5) # [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-        self.action_size_per_motor = len(self.motor_action_space)
-        self.action_size = (self.action_size_per_motor)**4
+        # self.motor_action_space = np.linspace(0.6, 0.8, 21) # [0.6 0.61 ... 0.8]
+        # self.action_size_per_motor = len(self.motor_action_space)
+        # self.action_size = (self.action_size_per_motor)**4
+        self.vertical_action_space = np.linspace(-0.5, 0.5, 21) # [-5.0 -4.5 ... 5.0]
+        self.forward_action_space = np.linspace(-3.0, 3.0, 21) # [-3.0 -2.7 ... 3.0]
+        self.yaw_action_space = np.linspace(-0.5, 0.5, 21) # [-5.0 -4.5 ... 5.0]
+        self.action_size = len(self.vertical_action_space) * len(self.forward_action_space) * len(self.yaw_action_space)
         
         # Initialize networks
         self.model = DQNModel(self.state_size, self.action_size)
@@ -59,7 +75,7 @@ class RLAgent:
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         
         # Experience replay
-        self.memory = ReplayBuffer(10000)
+        self.memory = ReplayBuffer(20000)
         
         # Training parameters
         self.update_target_every = 100
@@ -80,21 +96,33 @@ class RLAgent:
             # 최대 Q 값의 index를 action_idx로 설정
             action_idx = torch.argmax(q_values).item()
         
-        # Convert action index to actual control values
-        # action 총 개수가 x * x * x * x개 일 때, action_idx하나가 정해지면 아래 과정을 통해 action을 정한다
-        motor0_idx = action_idx % self.action_size_per_motor # result: 0 ~ (self.action_size_per_motor - 1)
-        motor1_idx = (action_idx // self.action_size_per_motor) % self.action_size_per_motor
-        motor2_idx = (action_idx // (self.action_size_per_motor)**2) % self.action_size_per_motor
-        motor3_idx = (action_idx // (self.action_size_per_motor)**3) % self.action_size_per_motor
+        # # Convert action index to actual control values
+        # # action 총 개수가 x * x * x * x개 일 때, action_idx하나가 정해지면 아래 과정을 통해 action을 정한다
+        # motor0_idx = action_idx % self.action_size_per_motor # result: 0 ~ (self.action_size_per_motor - 1)
+        # motor1_idx = (action_idx // self.action_size_per_motor) % self.action_size_per_motor
+        # motor2_idx = (action_idx // (self.action_size_per_motor)**2) % self.action_size_per_motor
+        # motor3_idx = (action_idx // (self.action_size_per_motor)**3) % self.action_size_per_motor
         
+        # return {
+        #     'motor0': self.motor_action_space[motor0_idx],
+        #     'motor1': self.motor_action_space[motor1_idx],
+        #     'motor2': self.motor_action_space[motor2_idx],
+        #     'motor3': self.motor_action_space[motor3_idx],
+        #     'action_idx': action_idx
+        # }
+
+        # Convert action index to setpoints
+        cor_ver_idx = action_idx % len(self.vertical_action_space)
+        cor_for_idx = (action_idx // len(self.vertical_action_space)) % len(self.forward_action_space)
+        cor_yaw_idx = (action_idx // (len(self.vertical_action_space) * len(self.forward_action_space))) % len(self.yaw_action_space)
+
         return {
-            'motor0': self.motor0[motor0_idx],
-            'motor1': self.motor1[motor1_idx],
-            'motor2': self.motor2[motor2_idx],
-            'motor3': self.motor3[motor3_idx],
-            'action_idx': action_idx
+            'cor_ver' : self.vertical_action_space[cor_ver_idx],
+            'cor_for' : self.forward_action_space[cor_for_idx],
+            'cor_yaw' : self.yaw_action_space[cor_yaw_idx],
+            'action_idx' : action_idx
         }
-    
+
     def remember(self, state, action, reward, next_state, done_episode):
         """Store experience in memory"""
         self.memory.push(state, action, reward, next_state, done_episode)
@@ -116,7 +144,7 @@ class RLAgent:
         dones = torch.FloatTensor(dones)
         
         # Current Q values
-        # states에 대한 모든 행동의 Q값을 신경망(model)에서 예측해서, 예측된 Q 값 중 실제로 수행한 action에 해당하는 Q 값만 추출(.gather())하고, 차원을 줄여서 1D 텐서로 변환 (.squeeze(1))
+        # states에 대한 모든 행동의 Q값을 신경망(model)에서 avg_reward = sum(self.episode_rewards) / len(self.episode_rewards) if self.episode_rewards else 0.0예측해서, 예측된 Q 값 중 실제로 수행한 action에 해당하는 Q 값만 추출(.gather())하고, 차원을 줄여서 1D 텐서로 변환 (.squeeze(1))
         current_q = self.model(states).gather(1, actions.unsqueeze(1)).squeeze(1)
         
         # Target Q values
@@ -152,87 +180,114 @@ class RLAgent:
         # 초반에는 random하게 환경을 탐색하는 것에 집중. 후반에는 학습이 많이 진행됐다고 판단하고 최적 정책을 따라가도록 설정
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
-            
-    def save_model(self, filepath):
-        """Save model weights"""
-        torch.save(self.model.state_dict(), filepath)
-        
-    def load_model(self, filepath):
-        """Load model weights"""
-        self.model.load_state_dict(torch.load(filepath))
-        self.target_model.load_state_dict(self.model.state_dict())
+            # print("epsilon decayed")
 
+    def save_model(self, path="agent_state.pth"):
+        torch.save({
+            "model": self.model.state_dict(),
+            "target_model": self.target_model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "epsilon": self.epsilon
+        }, path)
 
-    # Helper functions for reward computation
-    def compute_reward(self, lateral_error, vertical_error, forward_error, roll, pitch):
+    def load_model(self, path="agent_state.pth"):
+        if os.path.exists(path):
+            data = torch.load(path)
+            self.model.load_state_dict(data["model"])
+            self.target_model.load_state_dict(data["target_model"])
+            self.optimizer.load_state_dict(data["optimizer"])
+            self.epsilon = data.get("epsilon", 1.0)
+
+            print(f"Epsilon: {self.epsilon:.4f}")
+
+    def compute_reward(self, lateral_error, vertical_error, forward_error):
         """Compute reward based on tracking errors and control actions"""
         # Target region - higher reward for getting close to target
         target_reward = 0
-        if abs(lateral_error) < 32 and abs(vertical_error) < 24 and abs(forward_error) < 0.5:
+        if abs(lateral_error) < 32 and abs(vertical_error) < 0.2 and abs(forward_error) < 1.0:
+            target_reward = 20.0
+        elif abs(lateral_error) < 64 and abs(vertical_error) < 0.4 and abs(forward_error) < 2.0:
+            target_reward = 15.0
+        elif abs(lateral_error) < 128 and abs(vertical_error) < 0.8 and abs(forward_error) < 4.0:
             target_reward = 10.0
-        elif abs(lateral_error) < 64 and abs(vertical_error) < 48 and abs(forward_error) < 1.0:
-            target_reward = 5.0
             
         # Error penalties - penalize being far from target
-        lateral_penalty = -0.01 * min(abs(lateral_error), 300)
-        vertical_penalty = -0.01 * min(abs(vertical_error), 300)
-        forward_penalty = -0.01 * min(abs(forward_error), 300)
-        
-        # Attitude penalties - penalize unstable attitude
-        attitude_penalty = -0.01 * (abs(roll) + abs(pitch))
+        lateral_penalty = -0.05 * min(abs(lateral_error), 300)
+        vertical_penalty = -0.1 * min(abs(vertical_error), 300)
+        forward_penalty = -0.1 * min(abs(forward_error), 300)
         
         # Total reward
-        reward = target_reward + lateral_penalty + vertical_penalty + forward_penalty + attitude_penalty
+        reward = target_reward + lateral_penalty + vertical_penalty + forward_penalty
         
         return reward
 
+def offline_train_from_pickle(pickle_path, max_iteration=200):
+    with open(pickle_path, "rb") as f:
+        expert_data = pickle.load(f)
 
-    # # Example usage to train a model offline
-    # def train_model_offline(self, train_data, num_episodes=1000):
-    #     """
-    #     Train model offline using collected data
-        
-    #     Args:
-    #         train_data: List of dictionaries containing state, action, reward, next_state, done
-    #         num_episodes: Number of episodes to train
-    #     """
-    #     state_size = 5  # [lateral_error, vertical_error, forward_error, roll, pitch]
-    #     action_size = (self.action_size_per_motor)**4 # Discretized actions for motors
-        
-    #     agent = RLAgent(state_size, action_size)
-        
-    #     # Add data to replay buffer
-    #     for sample in train_data:
-    #         agent.memory.push(
-    #             sample['state'], 
-    #             sample['action_idx'], 
-    #             sample['reward'], 
-    #             sample['next_state'], 
-    #             sample['done']
-    #         )
-        
-    #     # Train for specified episodes
-    #     for episode in range(num_episodes):
-    #         agent.train()
-            
-    #         if episode % 100 == 0:
-    #             print(f"Episode {episode}/{num_episodes}")
-        
-    #     # Save trained model
-    #     agent.save_model("drone_rl_model_offline.pth")
-    #     print("Offline training complete. Model saved.")
-        
-    #     return agent
+    agent = RLAgent(learning_rate=0.01)
 
-if __name__ == '__main__':
-    # data = []
-    
-    # print("Training model with synthetic data...")
-    # agent = train_model_offline(data, num_episodes=500)
-    
-    # # Optional: Test trained model
-    # test_state = np.array([50.0, 30.0, 2.0, 0.0, 0.0, 0.0])
-    # action = agent.get_action(test_state)
-    # print(f"Test state: {test_state}")
-    # print(f"Recommended action: {action}")
-    print('pass the main')
+    for sample in expert_data:
+        if sample["state"] is None or sample["next_state"] is None:
+            continue
+        if not isinstance(sample["state"], (list, np.ndarray)) or not isinstance(sample["next_state"], (list, np.ndarray)):
+            continue
+
+        state = np.array(sample['state']).flatten().tolist()
+        next_state = np.array(sample['next_state']).flatten().tolist()
+        agent.remember(
+            state,
+            sample['action_idx'],
+            sample['reward'],
+            next_state,
+            sample['done']
+        )
+
+    loss_log = []
+    best_loss = float("inf")
+    best_model_state = None
+
+    for iteration in range(max_iteration):
+        if len(agent.memory) >= agent.batch_size:
+            batch = agent.memory.sample(agent.batch_size)
+            states, actions, rewards, next_states, dones = zip(*batch)
+
+            states = torch.FloatTensor(np.array(states))
+            actions = torch.LongTensor(actions)
+            rewards = torch.FloatTensor(rewards)
+            next_states = torch.FloatTensor(np.array(next_states))
+            dones = torch.FloatTensor(dones)
+
+            current_q = agent.model(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+            with torch.no_grad():
+                next_q = agent.target_model(next_states).max(1)[0]
+            target_q = rewards + (1 - dones) * agent.gamma * next_q
+            loss = F.mse_loss(current_q, target_q)
+            loss_log.append(loss.item())
+
+            # best loss 저장
+            if loss.item() < best_loss:
+                best_loss = loss.item()
+                best_model_state = {
+                    "model": agent.model.state_dict(),
+                    "target_model": agent.target_model.state_dict(),
+                    "optimizer": agent.optimizer.state_dict(),
+                    "epsilon": agent.epsilon
+                }
+
+            agent.train()
+
+        if iteration % 10 == 0:
+            recent_losses = loss_log[-5:]
+            avg_loss = sum(recent_losses) / len(recent_losses) if recent_losses else 0.0
+            print(f"iteration: {iteration}/{max_iteration}, avg_loss: {avg_loss:.4f}")
+
+    if best_model_state is not None:
+        torch.save(best_model_state, f"{best_loss:.4f}.pth")
+        print(f"Offline training complete. Best model saved with loss {best_loss:.4f}.")
+    else:
+        print("Training did not produce any valid model.")
+
+if __name__ == "__main__":
+    print("Training model with expert data...")
+    offline_train_from_pickle("/home/gr/iris_tracker_PID_RL/data/expert_data0402.pkl", max_iteration=120)

@@ -21,7 +21,8 @@ setup(
     entry_points={
         'console_scripts': [
             'iris_controller = controller.iris_controller:main',
-            'iris_camera_controller_PID = controller.iris_camera_controller_PID_setpoint:main',
+            'iris_camera_controller_PID = controller.iris_camera_controller_PID:main',
+            'iris_camera_controller_RL = controller.iris_camera_controller_RL:main',
         ],
     },
 )
