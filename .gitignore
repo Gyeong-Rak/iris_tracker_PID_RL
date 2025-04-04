@@ -4,4 +4,4 @@
 data/03*
 __pycache__/
 yolov8n.pt
-/temp*
+/RL_model_temp*
