@@ -136,7 +136,7 @@ class IrisCameraController(Node):
         5. variables for RL
         """
         self.agent = RLAgent_DQNModel.RLAgent()
-        self.agent.load_model("/home/gr/iris_tracker_PID_RL/weights/offline_train_from_expert_data/4.9158.pth")
+        self.agent.load_model("/home/gr/iris_tracker_PID_RL/RL_model_temp.pth")
         self.agent.epsilon = 0.0  # 평가 시 랜덤성 제거
 
         # """
@@ -344,12 +344,12 @@ class IrisCameraController(Node):
                     self.bbox_size_window.append(area)
                     if len(self.bbox_size_window) > 10:
                         self.bbox_size_window.pop(0)
-                    if self.state == 'Tagging':
-                        print("YOLO detected")
+                    # if self.state == 'Tagging':
+                    #     print("YOLO detected")
             else:
                 self.latest_bbox = None
-                if self.state == 'Tagging':
-                    print("YOLO detection lost")
+                # if self.state == 'Tagging':
+                #     print("YOLO detection lost")
         except Exception as e:
             print("Failed to parse bounding box: " + str(e))
 
@@ -363,8 +363,8 @@ class IrisCameraController(Node):
             if len(self.pixel_count_window) > 10:
                 self.pixel_count_window.pop(0)
 
-            if self.state == 'Tagging':
-                print(f"FastSAM pixel count received: {self.pixel_count}")
+            # if self.state == 'Tagging':
+            #     print(f"FastSAM pixel count received: {self.pixel_count}")
 
     def motor_output_callback(self, msg):
         self.motor_values = msg.output[:4]  # 쿼드로터 기준 motor 0~3
@@ -430,10 +430,10 @@ class IrisCameraController(Node):
                 else:
                     target_ned = np.array([0.0, 0.0, -10.0])
                     self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
-                    print(f"Go to origin")
+                    # print(f"Go to origin")
                     return
 
-                print(f"  ver_E: {error_vertical:.2f},   lat_E: {error_lateral:.2f},   for_E: {error_forward:.2f}")
+                # print(f"  ver_E: {error_vertical:.2f},   lat_E: {error_lateral:.2f},   for_E: {error_forward:.2f}")
 
                 state = np.array([error_vertical, error_forward, error_lateral], dtype=np.float32)
                 action = self.agent.get_action(state)
@@ -442,7 +442,7 @@ class IrisCameraController(Node):
                 correction_forward = action['cor_for']
                 correction_yaw = action['cor_yaw']
 
-                print(f"ver_cor: {correction_vertical:.2f}, lat_cor: {correction_yaw:.2f}, for_cor: {correction_forward:.2f}")
+                # print(f"ver_cor: {correction_vertical:.2f}, lat_cor: {correction_yaw:.2f}, for_cor: {correction_forward:.2f}")
 
                 new_yaw = self.yaw - correction_yaw
 
@@ -461,7 +461,7 @@ class IrisCameraController(Node):
 
                 target_ned = np.array([0.0, 0.0, -10.0])
                 self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
-                print(f"Go to origin")
+                # print(f"Go to origin")
 
             # current_time = self.get_clock().now().nanoseconds * 1e-9 - self.tagging_start_time
             # self.update_error_plot(current_time, error_forward, error_lateral, error_vertical)

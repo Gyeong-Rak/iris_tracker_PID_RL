@@ -67,15 +67,15 @@ def main():
             iris_controller_process = run_command(controller_cmd, cwd=ws_dir)
             processes.append(iris_controller_process)
 
-            # # 6. iris_camera_controller_PID node 실행
-            # controller_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && export PYTHONPATH=$PYTHONPATH:{ws_dir}/src/RL/RL && ros2 run controller iris_camera_controller_PID --ros-args -p mode:=pixel'"
-            # iris_camera_controller_process = run_command(controller_cmd, cwd=ws_dir, verbose=True)
-            # processes.append(iris_camera_controller_process)
-
-            # 6. iris_camera_controller_RL node 실행
-            controller_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && export PYTHONPATH=$PYTHONPATH:{ws_dir}/src/RL/RL && ros2 run controller iris_camera_controller_RL --ros-args -p mode:=pixel'"
+            # 6. iris_camera_controller_PID node 실행
+            controller_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && export PYTHONPATH=$PYTHONPATH:{ws_dir}/src/RL/RL && ros2 run controller iris_camera_controller_PID --ros-args -p mode:=pixel'"
             iris_camera_controller_process = run_command(controller_cmd, cwd=ws_dir, verbose=True)
             processes.append(iris_camera_controller_process)
+
+            # # 6. iris_camera_controller_RL node 실행
+            # controller_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && export PYTHONPATH=$PYTHONPATH:{ws_dir}/src/RL/RL && ros2 run controller iris_camera_controller_RL --ros-args -p mode:=pixel'"
+            # iris_camera_controller_process = run_command(controller_cmd, cwd=ws_dir, verbose=True)
+            # processes.append(iris_camera_controller_process)
             
             # # 6. 모델 학습
             # training_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && export PYTHONPATH=$PYTHONPATH:{ws_dir}/src/RL/RL && ros2 run RL RL_online_train --ros-args -p max_episodes:={max_episode} -p episode:={episode} -p mode:=pixel'"
@@ -97,7 +97,7 @@ def main():
             
             for proc in processes:
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    os.killpg(os.getpgid(proc.pid), signal.SIGINT)
                 except Exception as e:
                     print(f"프로세스 종료 중 오류: {e}")
             processes.clear()

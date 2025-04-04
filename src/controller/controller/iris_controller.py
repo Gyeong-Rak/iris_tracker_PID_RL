@@ -272,8 +272,8 @@ class iris_controller(Node):
         x_offset = amplitude * math.sin(speed * t)
 
         x_ned = 0.0
-        y_ned = 5 + x_offset
-        z_ned = -5.0
+        y_ned = x_offset
+        z_ned = -10.0
 
         self.publish_local2global_setpoint(local_setpoint=np.array([x_ned, y_ned, z_ned]))
 
@@ -327,23 +327,24 @@ class iris_controller(Node):
         now = self.get_clock().now().nanoseconds * 1e-9
         t = now - self.start_time
 
-        if t < 10: return # wait for iris_camera to be ready
+        if t < 5: return # wait for iris_camera to be ready
         
         if not hasattr(self, 'next_waypoint_time') or t >= self.next_waypoint_time:
             self.next_waypoint_time = t + 0.01
-            speed = 0.2
+            speed = 0.4
             if hasattr(self, 'current_waypoint'):
+                random_direction = random.uniform(-math.pi, math.pi)
                 delta = np.array([
-                    random.uniform(-speed, speed),  # dx
-                    random.uniform(-speed, speed),  # dy
-                    random.uniform(-speed, speed)   # dz
+                    speed * math.sin(random_direction),  # dx
+                    speed * math.cos(random_direction),  # dy
+                    0   # dz
                 ])
 
                 new_waypoint = self.current_waypoint + delta
                 self.current_waypoint = np.clip(
                     new_waypoint,
-                    [-5.0, -5.0, -10.5],  # 최소값 (x, y, z)
-                    [5.0, 5.0, -9.5]      # 최대값 (x, y, z)
+                    [-10.0, -10.0, -10.5],  # 최소값 (x, y, z)
+                    [10.0, 10.0, -9.5]      # 최대값 (x, y, z)
                 )
             else:
                 self.current_waypoint = self.pos

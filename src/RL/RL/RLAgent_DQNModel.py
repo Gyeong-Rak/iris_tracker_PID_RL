@@ -22,12 +22,6 @@ class DQNModel(nn.Module):
             nn.ReLU(),
             nn.Linear(256, 256),
             nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
             nn.Linear(256, action_size)
         )
         
@@ -49,14 +43,16 @@ class ReplayBuffer:
         return len(self.buffer)
 
 class RLAgent:
-    def __init__(self, learning_rate=0.0001, gamma=0.99, epsilon_decay = 0.999):
+    def __init__(self, learning_rate=0.0001, gamma=0.99, epsilon_decay = 0.999, batch_size = 32):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         self.state_size = 3
 
         self.gamma = gamma
         self.epsilon = 1.0
         self.epsilon_min = 0.01
         self.epsilon_decay = epsilon_decay
-        self.batch_size = 32
+        self.batch_size = batch_size
         self.learning_rate = learning_rate
         
         # Define action space
@@ -69,13 +65,13 @@ class RLAgent:
         self.action_size = len(self.vertical_action_space) * len(self.forward_action_space) * len(self.yaw_action_space)
         
         # Initialize networks
-        self.model = DQNModel(self.state_size, self.action_size)
-        self.target_model = DQNModel(self.state_size, self.action_size)
+        self.model = DQNModel(self.state_size, self.action_size).to(self.device)
+        self.target_model = DQNModel(self.state_size, self.action_size).to(self.device)
         self.target_model.load_state_dict(self.model.state_dict())
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         
         # Experience replay
-        self.memory = ReplayBuffer(20000)
+        self.buffer = ReplayBuffer(40000)
         
         # Training parameters
         self.update_target_every = 100
@@ -88,7 +84,7 @@ class RLAgent:
             action_idx = random.randrange(self.action_size)
         else:
             # state를 pytorch tensor로 변환하고 size를 (state_size, )에서 (batch_size(=1), state_size)로 변환
-            state_tensor = torch.FloatTensor(state).unsqueeze(0)
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             # inference 과정에서는 backpropagation을 안하기 때문에 grad계산 안하기
             with torch.no_grad():
                 # model에서 각 state에 대한 Q 값을 계산
@@ -124,24 +120,24 @@ class RLAgent:
         }
 
     def remember(self, state, action, reward, next_state, done_episode):
-        """Store experience in memory"""
-        self.memory.push(state, action, reward, next_state, done_episode)
+        """Store experience in buffer"""
+        self.buffer.push(state, action, reward, next_state, done_episode)
         
     def train(self):
         """Train the network using experience replay"""
-        if len(self.memory) < self.batch_size:
+        if len(self.buffer) < self.batch_size:
             return
         
-        # Sample a batch from memory
-        # data 상관관계를 제거하여 Independent and Identically Distributed 데이터를 보장하여 Local minima를 방지하기 위해 memory에서 랜덤 샘플링
-        batch = self.memory.sample(self.batch_size)
+        # Sample a batch from buffer
+        # data 상관관계를 제거하여 Independent and Identically Distributed 데이터를 보장하여 Local minima를 방지하기 위해 buffer에서 랜덤 샘플링
+        batch = self.buffer.sample(self.batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
         
-        states = torch.FloatTensor(np.array(states))
-        actions = torch.LongTensor(actions)
-        rewards = torch.FloatTensor(rewards)
-        next_states = torch.FloatTensor(np.array(next_states))
-        dones = torch.FloatTensor(dones)
+        states = torch.FloatTensor(np.array(states)).to(self.device)
+        actions = torch.LongTensor(actions).to(self.device)
+        rewards = torch.FloatTensor(rewards).to(self.device)
+        next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
+        dones = torch.FloatTensor(dones).to(self.device)
         
         # Current Q values
         # states에 대한 모든 행동의 Q값을 신경망(model)에서 avg_reward = sum(self.episode_rewards) / len(self.episode_rewards) if self.episode_rewards else 0.0예측해서, 예측된 Q 값 중 실제로 수행한 action에 해당하는 Q 값만 추출(.gather())하고, 차원을 줄여서 1D 텐서로 변환 (.squeeze(1))
@@ -184,11 +180,14 @@ class RLAgent:
 
     def save_model(self, path="agent_state.pth"):
         torch.save({
-            "model": self.model.state_dict(),
-            "target_model": self.target_model.state_dict(),
+            "model": self.model.cpu().state_dict(),
+            "target_model": self.target_model.cpu().state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "epsilon": self.epsilon
         }, path)
+
+        self.model.to(self.device)
+        self.target_model.to(self.device)
 
     def load_model(self, path="agent_state.pth"):
         if os.path.exists(path):
@@ -225,7 +224,7 @@ def offline_train_from_pickle(pickle_path, max_iteration=200):
     with open(pickle_path, "rb") as f:
         expert_data = pickle.load(f)
 
-    agent = RLAgent(learning_rate=0.01)
+    agent = RLAgent(learning_rate=0.000455, batch_size=40000, epsilon_decay=0.999)
 
     for sample in expert_data:
         if sample["state"] is None or sample["next_state"] is None:
@@ -246,10 +245,12 @@ def offline_train_from_pickle(pickle_path, max_iteration=200):
     loss_log = []
     best_loss = float("inf")
     best_model_state = None
+    diverse_signal = 0
+    last_avg_loss = 0.0
 
     for iteration in range(max_iteration):
-        if len(agent.memory) >= agent.batch_size:
-            batch = agent.memory.sample(agent.batch_size)
+        if len(agent.buffer) >= agent.batch_size:
+            batch = agent.buffer.sample(agent.batch_size)
             states, actions, rewards, next_states, dones = zip(*batch)
 
             states = torch.FloatTensor(np.array(states))
@@ -282,6 +283,16 @@ def offline_train_from_pickle(pickle_path, max_iteration=200):
             avg_loss = sum(recent_losses) / len(recent_losses) if recent_losses else 0.0
             print(f"iteration: {iteration}/{max_iteration}, avg_loss: {avg_loss:.4f}")
 
+            if avg_loss > last_avg_loss:
+                diverse_signal += 1
+
+            if diverse_signal > 2 and best_model_state is not None:
+                torch.save(best_model_state, f"{best_loss:.4f}.pth")
+                print(f"model seems diversing. Best model saved with loss {best_loss:.4f}.")
+                return
+            
+            last_avg_loss = avg_loss
+
     if best_model_state is not None:
         torch.save(best_model_state, f"{best_loss:.4f}.pth")
         print(f"Offline training complete. Best model saved with loss {best_loss:.4f}.")
@@ -290,4 +301,4 @@ def offline_train_from_pickle(pickle_path, max_iteration=200):
 
 if __name__ == "__main__":
     print("Training model with expert data...")
-    offline_train_from_pickle("/home/gr/iris_tracker_PID_RL/data/expert_data0402.pkl", max_iteration=120)
+    offline_train_from_pickle("/home/gr/iris_tracker_PID_RL/data/expert_data0403.pkl", max_iteration=500)

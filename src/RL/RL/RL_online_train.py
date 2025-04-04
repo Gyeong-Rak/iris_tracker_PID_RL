@@ -6,6 +6,7 @@ import math, os, ast
 from pathlib import Path
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 import RLAgent_DQNModel
+import RLAgent_DDPGModel
 
 """msgs for subscription"""
 from px4_msgs.msg import VehicleStatus
@@ -340,16 +341,18 @@ class RLtraining(Node):
                 return
             
             if not hasattr(self, 'rl_initialized'):
-                self.agent = RLAgent_DQNModel.RLAgent(learning_rate=0.001, gamma=0.99, epsilon_decay=0.995)
-                self.state_size = self.agent.state_size
-                self.action_size = self.agent.action_size
+                # self.agent = RLAgent_DQNModel.RLAgent(learning_rate=0.000001, gamma=0.99, epsilon_decay=0.9999)
+                # self.state_size = self.agent.state_size
+                # self.action_size = self.agent.action_size
+                self.agent = RLAgent_DDPGModel.DDPGAgent(state_dim=3, action_dim=4, max_action=[3.0, 3.0, 1.0, 0.5])
                 self.episode_steps = 0
                 self.episode_rewards = []
                 self.last_step_state = None
-                self.last_step_action_idx = None
+                # self.last_step_action_idx = None
+                self.last_step_action = None
                 
-                if os.path.exists("temp.pth"):
-                    self.agent.load_model("temp.pth")
+                if os.path.exists("RL_model_temp.pth"):
+                    self.agent.load_model("RL_model_temp.pth")
                     print("Loaded existing RL model")
                 
                 self.rl_initialized = True
@@ -383,18 +386,26 @@ class RLtraining(Node):
                 
                 reward = self.agent.compute_reward(error_lateral, error_vertical, error_forward)
                 
-                if self.last_step_state is not None and self.last_step_action_idx is not None:
-                    self.agent.remember(self.last_step_state, self.last_step_action_idx, reward, current_step_state, done_episode)
+                if self.last_step_state is not None and self.last_step_action is not None:
+                    # self.agent.remember(self.last_step_state, self.last_step_action_idx, reward, current_step_state, done_episode)
+                    self.agent.remember(self.last_step_state, self.last_step_action, reward, current_step_state, done_episode)
                     self.episode_rewards.append(reward)
                 
-                action_dict = self.agent.get_action(current_step_state)
-                correction_vertical = action_dict['cor_ver']
-                correction_forward = action_dict['cor_for']
-                correction_yaw = action_dict['cor_yaw']
-                self.last_step_action_idx = action_dict['action_idx']
+                # action_dict = self.agent.get_action(current_step_state)
+                # correction_vertical = action_dict['cor_ver']
+                # correction_forward = action_dict['cor_for']
+                # correction_yaw = action_dict['cor_yaw']
+                # self.last_step_action_idx = action_dict['action_idx']
+
+                action = self.agent.get_action(current_step_state, add_noise=True)
+                correction_vertical = action[0]
+                correction_forward  = action[1]
+                correction_yaw      = action[2]
+                self.last_step_action = action
+
                 self.last_step_state = current_step_state
 
-                if len(self.agent.memory) < self.agent.batch_size:
+                if len(self.agent.buffer) < self.agent.batch_size:
                     self.publish_setpoint(local_setpoint=[0.0, 0.0, 0.0])
                     print("wait for minimum step")
                 else:
@@ -410,9 +421,11 @@ class RLtraining(Node):
                 
                 self.episode_steps += 1
 
-                if self.episode_steps % 100 == 0:
-                    avg_reward = sum(self.episode_rewards) / len(self.episode_rewards) if self.episode_rewards else 0
-                    print(f"Step: {self.episode_steps}, Avg Reward: {avg_reward:.2f}, Epsilon: {self.agent.epsilon:.2f}")
+                recent_rewards = self.episode_rewards[-1000:]
+                avg_reward_recent = sum(recent_rewards) / len(recent_rewards) if recent_rewards else 0.0
+                avg_reward_total = sum(self.episode_rewards) / len(self.episode_rewards) if self.episode_rewards else 0.0
+                print(f"Step: {self.episode_steps}, AvgReward (recent1000): {avg_reward_recent:.2f}, AvgReward (total): {avg_reward_total:.2f}")
+                # print(f"Step: {self.episode_steps}, AvgReward (recent1000): {avg_reward_recent:.2f}, AvgReward (total): {avg_reward_total:.2f}, Epsilon: {self.agent.epsilon:.2f}")
                 
             else:
                 self.current_offboard_mode = {'direct_actuator': False, 'position': True}

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-import os, math, pickle
+import os, math, pickle, csv
 import numpy as np
 import ast
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-import RLAgent_DQNModel
+# import RLAgent_DQNModel
 
 """msgs for subscription"""
 from px4_msgs.msg import VehicleStatus
@@ -84,6 +84,9 @@ class IrisCameraController(Node):
         self.fastsam_detection_subscriber = self.create_subscription(
             Int32, '/FastSAM/object_pixel_count', self.pixel_count_callback, qos_profile_yolo
         )
+        # self.iris_local_pos_subscriber = self.create_subscription(
+        #     VehicleLocalPosition, '/px4_2/fmu/out/vehicle_local_position', self.vehicle_local_position_callback2, qos_profile
+        # )
 
         """
         2. Create Publishers
@@ -132,16 +135,23 @@ class IrisCameraController(Node):
         self.bbox_size_window = []  # 최근 10개의 bbox area를 저장하는 리스트
         self.pixel_count_window = []  # 
 
-        """
-        5. variables for RL
-        """
-        self.expert_data = []
-        self.last_state = None
-        self.last_action_idx = None
+        # """
+        # 5. variables for saving expert data
+        # """
+        # self.expert_data_path = "expert_data.pkl"
+        # if os.path.exists(self.expert_data_path):
+        #     with open(self.expert_data_path, "rb") as f:
+        #         self.expert_data = pickle.load(f)
+        #     print(f"Loaded existing expert data: {len(self.expert_data)} samples")
+        # else:
+        #     self.expert_data = []
+        # self.last_state = None
+        # self.last_action_idx = None
 
+        # self.last_bbox_time = 0.0
 
         # """
-        # 5. Error plot variables
+        # 5.1. Error plot variables
         # """
         # plt.ion()  # 인터랙티브 모드 활성화
         # self.fig, self.ax = plt.subplots(3, 1, figsize=(6, 5))
@@ -158,7 +168,7 @@ class IrisCameraController(Node):
         # fig_manager.window.setGeometry(3400, 1000, 700, 450)  # (X, Y, Width, Height)
 
         # """
-        # 5.1. Distance-Area plot variables
+        # 5.2. Distance-Area plot variables
         # """
         # self.fig, self.ax = plt.subplots(1, 1, figsize=(6, 5))
         # self.ax.set_title('Pixel Count')
@@ -178,6 +188,15 @@ class IrisCameraController(Node):
         """
         self.declare_parameter('mode', 'bbox')
         self.control_mode = self.get_parameter('mode').get_parameter_value().string_value
+
+        # """
+        # 8. Save errors
+        # """
+        # self.error_csv_filename = f"error_log_{self.control_mode}_{self.desired_distance}m.csv"
+        # self.error_csv_file = open(self.error_csv_filename, mode='w', newline='')
+        # self.error_csv_writer = csv.writer(self.error_csv_file)
+
+        # self.error_csv_writer.writerow(["Time (s)", "error_lateral", "error_vertical", "error_forward", "real_forward_error"])
 
     """
     Helper Functions
@@ -326,6 +345,11 @@ class IrisCameraController(Node):
         self.pos = np.array([msg.x, msg.y, msg.z])
         self.yaw = msg.heading
 
+    def vehicle_local_position_callback2(self, msg2): # NED
+        self.vehicle_local_position2= msg2
+        self.pos2 = np.array([msg2.x, msg2.y, msg2.z])
+        self.yaw2 = msg2.heading
+
     def vehicle_global_position_callback(self, msg):
         self.get_position_flag = True
         self.vehicle_global_position = msg
@@ -341,16 +365,17 @@ class IrisCameraController(Node):
                     center = np.array([(x1 + x2) / 2.0, (y1 + y2) / 2.0])
                     area = (x2 - x1) * (y2 - y1)
                     self.latest_bbox = {'center': center, 'area': area, 'timestamp': self.get_clock().now().nanoseconds * 1e-9}
+                    self.last_bbox_time = self.get_clock().now().nanoseconds * 1e-9
 
                     self.bbox_size_window.append(area)
                     if len(self.bbox_size_window) > 10:
                         self.bbox_size_window.pop(0)
-                    if self.state == 'Tagging':
-                        print("YOLO detected")
+                    # if self.state == 'Tagging':
+                    #     print("YOLO detected")
             else:
                 self.latest_bbox = None
-                if self.state == 'Tagging':
-                    print("YOLO detection lost")
+                # if self.state == 'Tagging':
+                #     print("YOLO detection lost")
         except Exception as e:
             print("Failed to parse bounding box: " + str(e))
 
@@ -364,8 +389,8 @@ class IrisCameraController(Node):
             if len(self.pixel_count_window) > 10:
                 self.pixel_count_window.pop(0)
 
-            if self.state == 'Tagging':
-                print(f"FastSAM pixel count received: {self.pixel_count}")
+            # if self.state == 'Tagging':
+            #     print(f"FastSAM pixel count received: {self.pixel_count}")
 
     def motor_output_callback(self, msg):
         self.motor_values = msg.output[:4]  # 쿼드로터 기준 motor 0~3
@@ -380,7 +405,7 @@ class IrisCameraController(Node):
         current_time = self.get_clock().now()
         if hasattr(self, 'last_heartbeat_time'):
             delta = (current_time - self.last_heartbeat_time).nanoseconds / 1e9
-            if delta > 0.06:  # More than 60ms between heartbeats
+            if delta > 1.0:  # More than 60ms between heartbeats
                 self.get_logger().warn(f"Heartbeat delay detected: {delta:.3f}s")
         self.last_heartbeat_time = current_time
         
@@ -399,7 +424,7 @@ class IrisCameraController(Node):
                     print("Waiting for position data")
                     return
                 self.home_position = self.set_home_position()
-                self.get_logger().info(f"Home position set to: [{self.home_position[0]:.2f}, {self.home_position[1]:.2f}, {self.home_position[2]:.2f}]")
+                # print(f"Home position set to: [{self.home_position[0]:.2f}, {self.home_position[1]:.2f}, {self.home_position[2]:.2f}]")
                 print("Iris Camera Taking off...")
                 self.state = 'takeoff'
         
@@ -415,6 +440,33 @@ class IrisCameraController(Node):
             error_vertical = 0.0
             error_forward = 0.0
 
+            # ### for expert data
+            # current_time = self.get_clock().now().nanoseconds * 1e-9
+            # done_episode = current_time - self.last_bbox_time > 10.0
+
+            # if done_episode:
+            #     if self.last_state is not None and self.last_action_idx is not None:
+            #         final_sample = {
+            #             "state": self.last_state,
+            #             "action_idx": self.last_action_idx,
+            #             "reward": 0.0,
+            #             "next_state": self.last_state,
+            #             "done": True
+            #         }
+            #         self.expert_data.append(final_sample)
+
+            #     with open("expert_data.pkl", "wb") as f:
+            #         pickle.dump(self.expert_data, f)
+            #     self.get_logger().info(f"Episode done. Expert data saved: {len(self.expert_data)} samples")
+
+            #     os.makedirs("/tmp", exist_ok=True)
+            #     with open("/tmp/rl_episode_done.flag", "w") as f:
+            #         f.write("done")
+
+            #     rclpy.shutdown()
+            #     return
+            # ###
+
             if self.latest_bbox is not None:
                 bbox_center = self.latest_bbox['center']
 
@@ -423,25 +475,50 @@ class IrisCameraController(Node):
                     error_lateral = (self.image_center[0] - bbox_center[0])
                     error_vertical = self.VerticalError2RelativeAltitude(self.image_center[1] - bbox_center[1], self.BBoxArea2Distance(filtered_bbox_area))
                     error_forward = self.BBoxArea2Distance(filtered_bbox_area) - self.desired_distance
+                    
+                    # current_time = self.get_clock().now().nanoseconds * 1e-9 - self.tagging_start_time
+                    # real_forward_error = np.linalg.norm(self.pos - self.pos2) - self.desired_distance
+                    # self.error_csv_writer.writerow([
+                    #     current_time,
+                    #     error_lateral,
+                    #     error_vertical,
+                    #     error_forward,
+                    #     real_forward_error
+                    # ])
+                    # self.error_csv_file.flush()
+
                 elif self.control_mode == 'pixel' and self.get_filtered_pixel_count() > 10:
                     filtered_pixel_count = self.get_filtered_pixel_count()
                     error_lateral = (self.image_center[0] - bbox_center[0])
                     error_vertical = self.VerticalError2RelativeAltitude(self.image_center[1] - bbox_center[1], self.PixelCount2Distance(filtered_pixel_count))
                     error_forward = self.PixelCount2Distance(filtered_pixel_count) - self.desired_distance
+
+                    # current_time = self.get_clock().now().nanoseconds * 1e-9 - self.tagging_start_time
+                    # real_forward_error = np.linalg.norm(self.pos - self.pos2) - self.desired_distance
+                    # self.error_csv_writer.writerow([
+                    #     current_time,
+                    #     error_lateral,
+                    #     error_vertical,
+                    #     error_forward,
+                    #     real_forward_error
+                    # ])
+                    # self.error_csv_file.flush()
+
                 else:
-                    target_ned = np.array([0.0, 0.0, -10.0])
-                    self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
-                    print(f"Go to origin")
+                    # target_ned = np.array([0.0, 0.0, -10.0])
+                    # self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
+                    # print(f"Go to origin")
+                    self.publish_setpoint(setpoint=self.pos)
                     return
 
-                print(f"  ver_E: {error_vertical:.2f},   lat_E: {error_lateral:.2f},   for_E: {error_forward:.2f}")
+                # print(f"  ver_E: {error_vertical:.2f},   lat_E: {error_lateral:.2f},   for_E: {error_forward:.2f}")
 
                 correction_vertical = self.pid_vertical.update(error_vertical)
                 correction_forward = np.clip(self.pid_forward.update(error_forward), -3, 20)
                 correction_yaw = np.clip(self.pid_lateral.update(error_lateral), -0.5, 0.5)
                 # if correction_forward == 20 and correction_vertical > 0: correction_vertical = 5
                 
-                print(f"ver_cor: {correction_vertical:.2f}, lat_cor: {correction_yaw:.2f}, for_cor: {correction_forward:.2f}")
+                # print(f"ver_cor: {correction_vertical:.2f}, lat_cor: {correction_yaw:.2f}, for_cor: {correction_forward:.2f}")
 
                 new_yaw = self.yaw - correction_yaw
 
@@ -454,9 +531,7 @@ class IrisCameraController(Node):
                 # print(f"N: {local_ned_setpoint[0]:.4f}, E: {local_ned_setpoint[1]:.4f}, D: {local_ned_setpoint[2]:.4f}, cor_yaw: {correction_yaw:.4f}")
                 # self.publish_local2global_setpoint(local_setpoint=np.array([0, 0, -5]))
 
-                """
-                Extract expert data
-                """
+                # ### for expert data
                 # current_state = [
                 #     error_lateral,
                 #     error_vertical,
@@ -478,15 +553,18 @@ class IrisCameraController(Node):
                 #     }
                 #     self.expert_data.append(sample)
 
+                #     if len(self.expert_data) % 1000 == 0:
+                #         print(f"Expert data collected: {len(self.expert_data)} samples")
+
                 # self.last_state = current_state
                 # self.last_action_idx = current_action_idx
+                # ###
 
             else:
                 """
                 Missing state policy
                 """
                 # ### go to view point
-
                 # target_offset_ned = np.array([0.0, 0.0, -10.0])  # home_position 기준 상대 좌표
                 # target_ned = self.home_position + target_offset_ned  # home_position을 기준으로 변환된 목표 위치
 
@@ -498,16 +576,16 @@ class IrisCameraController(Node):
                 # self.publish_setpoint(setpoint=target_ned, yaw_sp=yaw_to_target_ned)
                 # print(f"Setpoint: {target_ned}")
 
-                ### go to origin
-
+                ### go to origin and turn
                 target_ned = np.array([0.0, 0.0, -10.0])
                 self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
                 print(f"Go to origin")
 
                 # ### just turn
-
                 # self.publish_setpoint(setpoint = [0.0, 0.0, 0.0], yaw_sp = self.yaw)
 
+                # ### stop
+                # self.publish_setpoint(setpoint=self.pos)
 
             # current_time = self.get_clock().now().nanoseconds * 1e-9 - self.tagging_start_time
             # self.update_error_plot(current_time, error_forward, error_lateral, error_vertical)
@@ -580,6 +658,9 @@ def main(args=None):
         # with open("expert_data.pkl", "wb") as f:
         #     pickle.dump(node.expert_data, f)
         # print(f"Expert data saved: {len(node.expert_data)} samples")
+
+        # node.error_csv_file.close()
+
         node.destroy_node()
         rclpy.shutdown()
 
