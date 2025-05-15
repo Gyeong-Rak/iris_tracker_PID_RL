@@ -6,6 +6,7 @@ import numpy as np
 import ast
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 # import RLAgent_DQNModel
+import DDPGAgent
 
 """msgs for subscription"""
 from px4_msgs.msg import VehicleStatus
@@ -127,34 +128,35 @@ class IrisCameraController(Node):
 
         # PID controller initialization
         self.dt = 0.05
-        self.pid_forward = PID(Kp=1.5, Ki=0.0, Kd=0.0, dt=self.dt)
-        self.pid_lateral = PID(Kp=0.007, Ki=0.01, Kd=0.01, dt=self.dt)
+        self.pid_forward = PID(Kp=1.5, Ki=0.1, Kd=0.0, dt=self.dt)
+        self.pid_lateral = PID(Kp=0.009, Ki=0.01, Kd=0.01, dt=self.dt)
         self.pid_vertical = PID(Kp=2, Ki=0.0, Kd=0.1, dt=self.dt)
 
         self.latest_bbox = None
         self.bbox_size_window = []  # 최근 10개의 bbox area를 저장하는 리스트
         self.pixel_count_window = []  # 
 
-        # """
-        # 5. variables for saving expert data
-        # """
-        # self.expert_data_path = "expert_data.pkl"
-        # if os.path.exists(self.expert_data_path):
-        #     with open(self.expert_data_path, "rb") as f:
-        #         self.expert_data = pickle.load(f)
-        #     print(f"Loaded existing expert data: {len(self.expert_data)} samples")
-        # else:
-        #     self.expert_data = []
-        # self.last_state = None
-        # self.last_action_idx = None
+        """
+        5. variables for saving expert data
+        """
+        self.model = RLAgent_DDPGModel.DDPGAgent()
 
-        # self.last_bbox_time = 0.0
+        self.expert_data_path = "expert_data.pkl"
+        if os.path.exists(self.expert_data_path):
+            with open(self.expert_data_path, "rb") as f:
+                self.expert_data = pickle.load(f)
+            print(f"Loaded existing expert data: {len(self.expert_data)} samples")
+        else:
+            self.expert_data = []
+        self.last_state = None
+        self.last_action = None
+        self.last_bbox_time = 0.0
 
         # """
         # 5.1. Error plot variables
         # """
         # plt.ion()  # 인터랙티브 모드 활성화
-        # self.fig, self.ax = plt.subplots(3, 1, figsize=(6, 5))
+        # self.fig, self.ax = plt.50subplots(3, 1, figsize=(6, 5))
         # self.ax[0].set_title('Forward Error')
         # self.ax[1].set_title('Lateral Error')
         # self.ax[2].set_title('Vertical Error')
@@ -311,7 +313,8 @@ class IrisCameraController(Node):
         else:
             return np.mean(inliers)
 
-    def VerticalError2RelativeAltitude(self, error_vertical, distance, vertical_fov=1.123):
+    def VerticalError2RelativeAltitude(self, error_vertical, distance, horizontal_fov=1.396):
+        vertical_fov = 2 * math.atan(math.tan(horizontal_fov / 2) * (480 / 640))
         angle_per_pixel = vertical_fov / 480
         angle_offset = error_vertical * angle_per_pixel
         total_angle = self.pitch + angle_offset
@@ -440,32 +443,32 @@ class IrisCameraController(Node):
             error_vertical = 0.0
             error_forward = 0.0
 
-            # ### for expert data
-            # current_time = self.get_clock().now().nanoseconds * 1e-9
-            # done_episode = current_time - self.last_bbox_time > 10.0
+            ### for expert data
+            current_time = self.get_clock().now().nanoseconds * 1e-9
+            done_episode = current_time - self.last_bbox_time > 50.0
 
-            # if done_episode:
-            #     if self.last_state is not None and self.last_action_idx is not None:
-            #         final_sample = {
-            #             "state": self.last_state,
-            #             "action_idx": self.last_action_idx,
-            #             "reward": 0.0,
-            #             "next_state": self.last_state,
-            #             "done": True
-            #         }
-            #         self.expert_data.append(final_sample)
+            if done_episode:
+                if self.last_state is not None and self.last_action_idx is not None:
+                    final_sample = {
+                        "state": self.last_state,
+                        "action": self.last_action,
+                        "reward": 0.0,
+                        "next_state": self.last_state,
+                        "done": True
+                    }
+                    self.expert_data.append(final_sample)
 
-            #     with open("expert_data.pkl", "wb") as f:
-            #         pickle.dump(self.expert_data, f)
-            #     self.get_logger().info(f"Episode done. Expert data saved: {len(self.expert_data)} samples")
+                with open("expert_data.pkl", "wb") as f:
+                    pickle.dump(self.expert_data, f)
+                self.get_logger().info(f"Episode done. Expert data saved: {len(self.expert_data)} samples")
 
-            #     os.makedirs("/tmp", exist_ok=True)
-            #     with open("/tmp/rl_episode_done.flag", "w") as f:
-            #         f.write("done")
+                os.makedirs("/tmp", exist_ok=True)
+                with open("/tmp/rl_episode_done.flag", "w") as f:
+                    f.write("done")
 
-            #     rclpy.shutdown()
-            #     return
-            # ###
+                rclpy.shutdown()
+                return
+            ###
 
             if self.latest_bbox is not None:
                 bbox_center = self.latest_bbox['center']
@@ -505,10 +508,10 @@ class IrisCameraController(Node):
                     # self.error_csv_file.flush()
 
                 else:
-                    # target_ned = np.array([0.0, 0.0, -10.0])
-                    # self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
+                    target_ned = np.array([0.0, 0.0, -10.0])
+                    self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
                     # print(f"Go to origin")
-                    self.publish_setpoint(setpoint=self.pos)
+                    # self.publish_setpoint(setpoint=self.pos)
                     return
 
                 # print(f"  ver_E: {error_vertical:.2f},   lat_E: {error_lateral:.2f},   for_E: {error_forward:.2f}")
@@ -516,7 +519,7 @@ class IrisCameraController(Node):
                 correction_vertical = self.pid_vertical.update(error_vertical)
                 correction_forward = np.clip(self.pid_forward.update(error_forward), -3, 20)
                 correction_yaw = np.clip(self.pid_lateral.update(error_lateral), -0.5, 0.5)
-                # if correction_forward == 20 and correction_vertical > 0: correction_vertical = 5
+                if correction_forward > 10 and correction_vertical > 0: correction_vertical = 5
                 
                 # print(f"ver_cor: {correction_vertical:.2f}, lat_cor: {correction_yaw:.2f}, for_cor: {correction_forward:.2f}")
 
@@ -531,34 +534,55 @@ class IrisCameraController(Node):
                 # print(f"N: {local_ned_setpoint[0]:.4f}, E: {local_ned_setpoint[1]:.4f}, D: {local_ned_setpoint[2]:.4f}, cor_yaw: {correction_yaw:.4f}")
                 # self.publish_local2global_setpoint(local_setpoint=np.array([0, 0, -5]))
 
-                # ### for expert data
-                # current_state = [
-                #     error_lateral,
-                #     error_vertical,
-                #     error_forward
-                # ]
+                ### for expert data
+                current_action = np.array([
+                    correction_vertical,
+                    correction_forward,
+                    correction_yaw
+                ], dtype=np.float32)
 
-                # agent = RLAgent_DQNModel.RLAgent()
+                error_vertical_normalized = error_vertical / 2.0
+                error_forward_normalized = error_forward / 5.0
+                error_lateral_normalized = error_lateral / 300.0
+
+                current_state = np.array([
+                    error_vertical_normalized,
+                    error_forward_normalized,
+                    error_lateral_normalized
+                ], dtype=np.float32)
+
                 # current_action_idx = self.get_action_idx_from_corrections(correction_vertical, correction_forward, correction_yaw, 
                 #                                                   agent.vertical_action_space, agent.forward_action_space, agent.yaw_action_space)
-                # reward = agent.compute_reward(error_lateral, error_vertical, error_forward)
+                reward = self.model.compute_reward(error_lateral_normalized, error_vertical_normalized, error_forward_normalized)
 
-                # if self.last_state is not None and self.last_action_idx is not None:
-                #     sample = {
-                #         "state": self.last_state,
-                #         "action_idx": self.last_action_idx,
-                #         "reward": reward,
-                #         "next_state": current_state,
-                #         "done": False
-                #     }
-                #     self.expert_data.append(sample)
+                if self.last_state is not None and self.last_action is not None:
+                    if len(self.expert_data) >= 100000:
+                        with open("expert_data.pkl", "wb") as f:
+                            pickle.dump(self.expert_data, f)
+                        self.get_logger().info(f"Expert data collection complete: {len(self.expert_data)} samples. Shutting down.")
 
-                #     if len(self.expert_data) % 1000 == 0:
-                #         print(f"Expert data collected: {len(self.expert_data)} samples")
+                        os.makedirs("/tmp", exist_ok=True)
+                        with open("/tmp/rl_episode_done.flag", "w") as f:
+                            f.write("done")
+                        
+                        rclpy.shutdown()
+                        return
 
-                # self.last_state = current_state
-                # self.last_action_idx = current_action_idx
-                # ###
+                    sample = {
+                        "state": self.last_state,
+                        "action": self.last_action,
+                        "reward": reward,
+                        "next_state": current_state,
+                        "done": False
+                    }
+                    self.expert_data.append(sample)
+
+                    if len(self.expert_data) % 1000 == 0:
+                        print(f"Expert data collected: {len(self.expert_data)} samples")
+
+                self.last_state = current_state
+                self.last_action = current_action
+                ###
 
             else:
                 """
@@ -579,7 +603,7 @@ class IrisCameraController(Node):
                 ### go to origin and turn
                 target_ned = np.array([0.0, 0.0, -10.0])
                 self.publish_local2global_setpoint(local_setpoint=target_ned, yaw_sp=self.yaw + 0.5)
-                print(f"Go to origin")
+                # print(f"Go to origin")
 
                 # ### just turn
                 # self.publish_setpoint(setpoint = [0.0, 0.0, 0.0], yaw_sp = self.yaw)
@@ -655,9 +679,9 @@ def main(args=None):
     except KeyboardInterrupt:
         print("KeyboardInterrupt received.")
     finally:
-        # with open("expert_data.pkl", "wb") as f:
-        #     pickle.dump(node.expert_data, f)
-        # print(f"Expert data saved: {len(node.expert_data)} samples")
+        with open("expert_data.pkl", "wb") as f:
+            pickle.dump(node.expert_data, f)
+        print(f"Expert data saved: {len(node.expert_data)} samples")
 
         # node.error_csv_file.close()
 

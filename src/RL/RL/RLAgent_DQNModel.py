@@ -14,15 +14,11 @@ class DQNModel(nn.Module):
     def __init__(self, state_size, action_size):
         super(DQNModel, self).__init__()
         self.net = nn.Sequential(
-            nn.Linear(state_size, 256),
+            nn.Linear(state_size, 32),
             nn.ReLU(),
-            nn.Linear(256, 256),
+            nn.Linear(32, 32),
             nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, action_size)
+            nn.Linear(32, action_size)
         )
         
     def forward(self, x):
@@ -43,7 +39,7 @@ class ReplayBuffer:
         return len(self.buffer)
 
 class RLAgent:
-    def __init__(self, learning_rate=0.0001, gamma=0.99, epsilon_decay = 0.999, batch_size = 32):
+    def __init__(self, learning_rate=0.001, gamma=0.95, epsilon_decay = 0.99, batch_size = 32):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.state_size = 3

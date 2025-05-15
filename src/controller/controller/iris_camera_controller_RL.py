@@ -5,7 +5,8 @@ import os, math, pickle
 import numpy as np
 import ast
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-import RLAgent_DQNModel
+# import RLAgent_DQNModel
+import RLAgent_DDPGModel
 
 """msgs for subscription"""
 from px4_msgs.msg import VehicleStatus
@@ -135,9 +136,8 @@ class IrisCameraController(Node):
         """
         5. variables for RL
         """
-        self.agent = RLAgent_DQNModel.RLAgent()
-        self.agent.load_model("/home/gr/iris_tracker_PID_RL/RL_model_temp.pth")
-        self.agent.epsilon = 0.0  # 평가 시 랜덤성 제거
+        self.agent = RLAgent_DDPGModel.DDPGAgent()
+        self.agent.load_model("/home/gr/iris_tracker_PID_RL/results/0430_1800/RL_model_episode49.pth")
 
         # """
         # 5. Error plot variables
@@ -323,6 +323,7 @@ class IrisCameraController(Node):
     def vehicle_local_position_callback(self, msg): # NED
         self.vehicle_local_position = msg
         self.pos = np.array([msg.x, msg.y, msg.z])
+        self.vel = np.array([msg.vx, msg.vy, msg.vz])
         self.yaw = msg.heading
 
     def vehicle_global_position_callback(self, msg):
@@ -436,11 +437,11 @@ class IrisCameraController(Node):
                 # print(f"  ver_E: {error_vertical:.2f},   lat_E: {error_lateral:.2f},   for_E: {error_forward:.2f}")
 
                 state = np.array([error_vertical, error_forward, error_lateral], dtype=np.float32)
-                action = self.agent.get_action(state)
+                action = self.agent.get_action(state, add_noise=False)
 
-                correction_vertical = action['cor_ver']
-                correction_forward = action['cor_for']
-                correction_yaw = action['cor_yaw']
+                correction_vertical = action[0]
+                correction_forward = action[1]
+                correction_yaw = action[2]
 
                 # print(f"ver_cor: {correction_vertical:.2f}, lat_cor: {correction_yaw:.2f}, for_cor: {correction_forward:.2f}")
 

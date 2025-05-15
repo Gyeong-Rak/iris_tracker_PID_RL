@@ -20,7 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'RL_online_train = RL.RL_online_train:main',
+            'DDPG_train = RL.DDPG_train:main',
+            'Decoupled_DDPG_train = RL.Decoupled_DDPG_train:main',
         ],
     },
 )

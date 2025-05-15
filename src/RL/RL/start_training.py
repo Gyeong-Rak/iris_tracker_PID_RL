@@ -5,7 +5,7 @@ import os
 import signal
 
 def run_command(command, cwd=None, wait=False, verbose=False):
-    print(f"Running: {command}")
+    # print(f"Running: {command}")
 
     process = subprocess.Popen(
         command,
@@ -20,24 +20,27 @@ def run_command(command, cwd=None, wait=False, verbose=False):
     return process
 
 def main():
+    from datetime import datetime
+    start_time = datetime.now().strftime("%m%d_%H%M")
+    results_dir = os.path.join("/home/gr/iris_tracker_PID_RL/results", start_time)
+    os.makedirs(results_dir, exist_ok=True)
+    os.environ["RESULTS_DIR"] = results_dir
+
     Done = False
     episode = 0
-    max_episode = 50
+    max_episode = 200
     ws_dir = os.path.join(os.getcwd(), "iris_tracker_PID_RL")
     processes = []
-
-    if episode > max_episode:
-        print("Model training complete")
-        for proc in processes:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except Exception as e:
-                print(f"종료 중 오류: {e}")
-        print("모든 프로세스를 종료했습니다.")
 
     try:
         while not Done:
             episode += 1
+
+            if episode > max_episode:
+                print("Model training complete")
+                Done = True
+                break
+
             print(f"\n--- Training Episode {episode} 시작 ---\n")
             
             # 1. 시뮬레이션 실행 (GUI 없이)
@@ -67,20 +70,20 @@ def main():
             iris_controller_process = run_command(controller_cmd, cwd=ws_dir)
             processes.append(iris_controller_process)
 
-            # 6. iris_camera_controller_PID node 실행
-            controller_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && export PYTHONPATH=$PYTHONPATH:{ws_dir}/src/RL/RL && ros2 run controller iris_camera_controller_PID --ros-args -p mode:=pixel'"
-            iris_camera_controller_process = run_command(controller_cmd, cwd=ws_dir, verbose=True)
-            processes.append(iris_camera_controller_process)
+            # # 6. iris_camera_controller_PID node 실행
+            # controller_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && export PYTHONPATH=$PYTHONPATH:{ws_dir}/src/RL/RL && ros2 run controller iris_camera_controller_PID --ros-args -p mode:=pixel'"
+            # iris_camera_controller_process = run_command(controller_cmd, cwd=ws_dir, verbose=True)
+            # processes.append(iris_camera_controller_process)
 
             # # 6. iris_camera_controller_RL node 실행
             # controller_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && export PYTHONPATH=$PYTHONPATH:{ws_dir}/src/RL/RL && ros2 run controller iris_camera_controller_RL --ros-args -p mode:=pixel'"
             # iris_camera_controller_process = run_command(controller_cmd, cwd=ws_dir, verbose=True)
             # processes.append(iris_camera_controller_process)
             
-            # # 6. 모델 학습
-            # training_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && export PYTHONPATH=$PYTHONPATH:{ws_dir}/src/RL/RL && ros2 run RL RL_online_train --ros-args -p max_episodes:={max_episode} -p episode:={episode} -p mode:=pixel'"
-            # train_process = run_command(training_cmd, cwd=ws_dir, verbose=True)
-            # processes.append(train_process)
+            # 6. 모델 학습
+            training_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && export PYTHONPATH=$PYTHONPATH:{ws_dir}/src/RL/RL && ros2 run RL Decoupled_DDPG_train --ros-args -p max_episodes:={max_episode} -p episode:={episode} -p mode:=pixel'"
+            train_process = run_command(training_cmd, cwd=ws_dir, verbose=True)
+            processes.append(train_process)
 
             while True:
                 try:
@@ -97,7 +100,7 @@ def main():
             
             for proc in processes:
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 except Exception as e:
                     print(f"프로세스 종료 중 오류: {e}")
             processes.clear()

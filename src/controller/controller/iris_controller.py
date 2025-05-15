@@ -152,6 +152,7 @@ class iris_controller(Node):
             # self.distance_measure_trajectory()
             # self.xyz_helical_trajectory(3, 0.2, 1) # radius, omega, speed
             self.random_waypoint_trajectory()
+            # self.publish_local2global_setpoint(local_setpoint= (self.home_position+[0.0, 5.0, -10.0]))
 
     """
     Callback functions for subscribers.
@@ -331,7 +332,7 @@ class iris_controller(Node):
         
         if not hasattr(self, 'next_waypoint_time') or t >= self.next_waypoint_time:
             self.next_waypoint_time = t + 0.01
-            speed = 0.4
+            speed = 0.2
             if hasattr(self, 'current_waypoint'):
                 random_direction = random.uniform(-math.pi, math.pi)
                 delta = np.array([
@@ -339,13 +340,23 @@ class iris_controller(Node):
                     speed * math.cos(random_direction),  # dy
                     0   # dz
                 ])
-
                 new_waypoint = self.current_waypoint + delta
-                self.current_waypoint = np.clip(
+
+                clipped = np.clip(
                     new_waypoint,
-                    [-10.0, -10.0, -10.5],  # 최소값 (x, y, z)
-                    [10.0, 10.0, -9.5]      # 최대값 (x, y, z)
+                    [-10.0, -10.0, -12.0],  # 최소 (x, y, z)
+                    [10.0, 10.0, -8.0]      # 최대 (x, y, z)
                 )
+
+                origin = np.array([0.0, 0.0, -10.0])
+                min_dist = 2.0  # 최소 거리(m), 필요 시 값 조정
+                vec = clipped - origin
+                dist = np.linalg.norm(vec)
+                if dist < min_dist:
+                    dir_vec = vec / dist if dist > 0 else np.array([1.0, 0.0, 0.0])
+                    clipped = origin + dir_vec * min_dist
+                self.current_waypoint = clipped
+
             else:
                 self.current_waypoint = self.pos
             
