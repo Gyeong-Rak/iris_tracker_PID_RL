@@ -7,17 +7,16 @@ import random
 from collections import deque
 
 class Actor(nn.Module):
-    def __init__(self, state_dim, action_dim, max_action):
+    def __init__(self, state_dim, action_dim):
         super().__init__()
         self.fc1 = nn.Linear(state_dim, 64)
         self.relu = nn.ReLU()
         self.fc2 = nn.Linear(64, action_dim)
         self.tanh = nn.Tanh()
-        self.max_action = torch.tensor(max_action, dtype=torch.float32)
 
     def forward(self, x):
         x = self.relu(self.fc1(x))
-        return self.tanh(self.fc2(x)) * self.max_action.to(x.device)
+        return self.tanh(self.fc2(x))
 
 class Critic(nn.Module):
     def __init__(self, state_dim, action_dim):
@@ -66,41 +65,41 @@ class OUActionNoise:
 
 class DDPGAgent:
     def __init__(self, batch_size = 128, gamma = 0.99, tau = 0.001, noise_std = 0.05,
-                  actor_lr = 2e-4, critic_lr = 2e-3,
-                  max_action=[1.0, 2.0, 0.5], mode='all'):
+                  actor_lr = 2e-4, critic_lr = 2e-3, actor_weight_decay = 5e-4, critic_weight_decay = 5e-4,
+                  max_action=[1.0, 1.0, 0.5], mode='all', history_length=2):
         # state : [error_vertical, error_forward, error_lateral]    /    action : [correction_vertical, correction_forward, correction_yaw]
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+        self.history_length = history_length
         self.mode = mode
         self.max_action = np.array(max_action)
         if mode == 'lateral':
-            self.state_dim, self.action_dim = 2, 1
+            self.state_dim, self.action_dim = self.history_length, 1
             self.max_action = np.array([self.max_action[2]])
         elif mode == 'vertical':
-            self.state_dim, self.action_dim = 3, 1
+            self.state_dim, self.action_dim = self.history_length, 1
             self.max_action = np.array([self.max_action[0]])
         elif mode == 'forward':
-            self.state_dim, self.action_dim = 3, 1
+            self.state_dim, self.action_dim = self.history_length + 1, 1
             self.max_action = np.array([self.max_action[1]])
         else:  # 'all'
-            print("################## Please check the mode")
+            print("##### Please check the mode #####")
 
         self.max_action_tensor = torch.tensor(self.max_action, dtype=torch.float32, device=self.device).view(1, -1)
 
-        self.actor = Actor(self.state_dim, self.action_dim, self.max_action).to(self.device)
-        self.actor_target = Actor(self.state_dim, self.action_dim, self.max_action).to(self.device)
+        self.actor = Actor(self.state_dim, self.action_dim).to(self.device)
+        self.actor_target = Actor(self.state_dim, self.action_dim).to(self.device)
         self.actor_target.load_state_dict(self.actor.state_dict())
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr, weight_decay=1e-4)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr, weight_decay=actor_weight_decay)
 
         self.critic = Critic(self.state_dim, self.action_dim).to(self.device)
         self.critic_target = Critic(self.state_dim, self.action_dim).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=critic_lr, weight_decay=1e-3)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=critic_lr, weight_decay=critic_weight_decay)
 
         self.critic2 = Critic(self.state_dim, self.action_dim).to(self.device)
         self.critic2_target = Critic(self.state_dim, self.action_dim).to(self.device)
         self.critic2_target.load_state_dict(self.critic2.state_dict())
-        self.critic2_optimizer = optim.Adam(self.critic2.parameters(), lr=critic_lr, weight_decay=1e-3)
+        self.critic2_optimizer = optim.Adam(self.critic2.parameters(), lr=critic_lr, weight_decay=critic_weight_decay)
 
         self.buffer = ReplayBuffer()
         self.batch_size = batch_size
@@ -138,7 +137,7 @@ class DDPGAgent:
             tq1 = self.critic_target(ns, next_a)
             tq2 = self.critic2_target(ns, next_a)
             ratio = torch.min(tq1, tq2) / (torch.max(tq1, tq2) + 1e-6) # 1e-6 for numerial stability
-            target_q = r + (1 - d) * self.gamma * ratio * torch.min(tq1, tq2)
+            target_q = r + (1 - d) * self.gamma * abs(ratio) * torch.min(tq1, tq2)
 
         q1 = self.critic(s, a)
         loss1 = nn.MSELoss()(q1, target_q)
@@ -202,4 +201,16 @@ class DDPGAgent:
         self.tau       = checkpoint.get('tau',       self.tau)
 
     def compute_reward(self, error):
-        return -np.linalg.norm(error)
+
+        abs_error = abs(error)
+        
+        if abs_error > 0.5:
+            reward = - abs_error
+        else:
+            reward = - 0.5 * abs_error
+
+        if self.mode == 'forward' and error < -0.5:
+            reward *= 2
+
+        return reward
+        

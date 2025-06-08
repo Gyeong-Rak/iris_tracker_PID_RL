@@ -2,7 +2,7 @@
 import rclpy
 from rclpy.node import Node
 import numpy as np
-import math, os, ast, csv
+import math, os, ast, csv, signal
 from pathlib import Path
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 import Decoupled_DDPGAgent as DDPGAgent
@@ -113,22 +113,25 @@ class RLtraining(Node):
         
         self.done_episode = False
 
+        self.history_length = 2  # 상태 벡터의 히스토리 길이
+        self.ver_error_hist = deque([0.0] * self.history_length, maxlen=self.history_length)
+        self.fwd_error_hist = deque([0.0] * self.history_length, maxlen=self.history_length)
+        self.lat_error_hist = deque([0.0] * self.history_length, maxlen=self.history_length)
+
         """
         5. Model initialization
         """
         self.results_dir = os.environ.get("RESULTS_DIR")
 
-        self.ver_agent = DDPGAgent.DDPGAgent(actor_lr = 1.5e-4, critic_lr = 1.5e-3, mode='vertical')
-        self.fwd_agent  = DDPGAgent.DDPGAgent(actor_lr = 1e-4, critic_lr = 1e-3, mode='forward')
-        self.lat_agent  = DDPGAgent.DDPGAgent(actor_lr = 2e-4, critic_lr = 2e-3, mode='lateral')
+        self.ver_agent = DDPGAgent.DDPGAgent(actor_lr = 5e-5, critic_lr = 5e-4, mode='vertical', history_length=self.history_length)
+        self.fwd_agent  = DDPGAgent.DDPGAgent(actor_lr = 5e-5, critic_lr = 5e-4, mode='forward', history_length=self.history_length)
+        self.lat_agent  = DDPGAgent.DDPGAgent(actor_lr = 5e-5, critic_lr = 5e-4, mode='lateral', history_length=self.history_length)
 
         self.env_step          = 0
         self.train_step        = 0
         self.episode_rewards   = []
         self.last_ver_state, self.last_fwd_state, self.last_lat_state = None, None, None
-        self.last_ver_error_norm, self.last_fwd_error_norm, self.last_lat_error_norm = None, None, None
-        self.last_ver_action, self.last_fwd_action, self.last_lat_action = None, None, None
-        self.high_reward_count = 0
+        self.last_ver_action, self.last_fwd_action, self.last_lat_action = 0.0, 0.0, 0.0
         
         if os.path.exists(path=os.path.join(self.results_dir, "RL_model_temp_vertical.pth")):
             self.ver_agent.load_model(path=os.path.join(self.results_dir, "RL_model_temp_vertical.pth"))
@@ -153,6 +156,12 @@ class RLtraining(Node):
         train_cb_group = ReentrantCallbackGroup()
         self.train_lock = Lock()
         self.training_timer = self.create_timer(0.2, self.train_callback, callback_group=train_cb_group) # 5Hz
+
+        """
+        6. Signal handling for graceful shutdown
+        """
+        signal.signal(signal.SIGTERM, lambda *_: self._graceful_timeout())
+        signal.signal(signal.SIGINT,  lambda *_: self._graceful_timeout())
 
         """
         7. Node parameter
@@ -243,6 +252,30 @@ class RLtraining(Node):
         angle_offset = error_vertical * angle_per_pixel
         total_angle = self.pitch + angle_offset
         return distance * math.sin(total_angle)
+
+    def save_all(self, suffix="timeout"):
+        """모델·버퍼를 suffix를 붙여 저장"""
+        self.ver_agent.save_model(os.path.join(self.results_dir,
+                            f"RL_model_{suffix}_vertical.pth"))
+        self.fwd_agent.save_model(os.path.join(self.results_dir,
+                            f"RL_model_{suffix}_forward.pth"))
+        self.lat_agent.save_model(os.path.join(self.results_dir,
+                            f"RL_model_{suffix}_lateral.pth"))
+        with open(os.path.join(self.results_dir,
+                            f"RL_buffer_{suffix}_vertical.pkl"), "wb") as f:
+            pickle.dump(list(self.ver_agent.buffer.buffer), f)
+        with open(os.path.join(self.results_dir,
+                            f"RL_buffer_{suffix}_forward.pkl"), "wb") as f:
+            pickle.dump(list(self.fwd_agent.buffer.buffer), f)
+        with open(os.path.join(self.results_dir,
+                            f"RL_buffer_{suffix}_lateral.pkl"), "wb") as f:
+            pickle.dump(list(self.lat_agent.buffer.buffer), f)
+        print(f"[{suffix}] 모델·버퍼 저장 완료")
+
+    def _graceful_timeout(self):
+        # 현재까지 학습 내용 저장
+        self.save_all("timeout")
+        rclpy.shutdown()
 
     """
     Callback functions for subscribers.
@@ -345,13 +378,9 @@ class RLtraining(Node):
                 error_forward = 0.0
 
                 current_time = self.get_clock().now().nanoseconds * 1e-9
-                lost_condition = (current_time - self.last_bbox_time) > 10.0
-                success_condition = self.high_reward_count >= 100
-                
+                lost_condition = (current_time - self.last_bbox_time) > 20.0
                 if lost_condition: print("Done episode: YOLO detection lost")
-                if success_condition: print("Done episode: Success condition met")
-
-                self.done_episode = lost_condition or success_condition
+                self.done_episode = lost_condition
 
                 if self.done_episode:
                     if self.episode_number == self.max_episodes:
@@ -404,15 +433,17 @@ class RLtraining(Node):
                     error_fwd_norm = error_forward    / 2.0
                     error_lat_norm = error_lateral    / 300.0
 
-                    # --- 상태 벡터 생성 ---
-                    if self.last_ver_error_norm is None and self.last_ver_action is None:
-                        ver_state_curr = np.array([error_ver_norm, 0.0, 0.0], dtype=float)
-                        fwd_state_curr = np.array([error_fwd_norm, 0.0, 0.0], dtype=float)
-                        lat_state_curr = np.array([error_lat_norm, 0.0], dtype=float)
-                    else:
-                        ver_state_curr = np.array([error_ver_norm, self.last_ver_error_norm, self.last_fwd_action], dtype=float)
-                        fwd_state_curr = np.array([error_fwd_norm, self.last_fwd_error_norm, self.last_ver_action], dtype=float)
-                        lat_state_curr = np.array([error_lat_norm, self.last_lat_error_norm], dtype=float)
+                    # --- 에러 히스토리 업데이트 ---
+                    self.ver_error_hist.append(error_ver_norm)
+                    self.fwd_error_hist.append(error_fwd_norm)
+                    self.lat_error_hist.append(error_lat_norm)
+
+                    # --- 상태 벡터 생성 (현재부터 과거 n-1 step 에러) ---
+                    ver_state_curr = np.array(list(self.ver_error_hist) + [self.last_fwd_action], dtype=float)
+                    # fwd_state_curr = np.array(list(self.fwd_error_hist) + [self.last_ver_action], dtype=float)
+                    # ver_state_curr = np.array(list(self.ver_error_hist), dtype=float)
+                    fwd_state_curr = np.array(list(self.fwd_error_hist), dtype=float)
+                    lat_state_curr = np.array(list(self.lat_error_hist), dtype=float)
 
                     # --- 보상 계산 ---
                     ver_reward = self.ver_agent.compute_reward(error_ver_norm)
@@ -433,15 +464,13 @@ class RLtraining(Node):
 
                     # --- 마지막 상태/액션 업데이트 ---
                     self.last_ver_state         = ver_state_curr
-                    self.last_ver_error_norm    = error_ver_norm
                     self.last_ver_action        = correction_vertical
                     self.last_fwd_state         = fwd_state_curr
-                    self.last_fwd_error_norm    = error_fwd_norm
                     self.last_fwd_action        = correction_forward
                     self.last_lat_state         = lat_state_curr
-                    self.last_lat_error_norm    = error_lat_norm
                     self.last_lat_action        = correction_yaw
 
+                    # --- publish setpoint ---
                     if len(self.ver_agent.buffer) < self.ver_agent.batch_size:
                         self.publish_setpoint(local_setpoint=[0.0, 0.0, 0.0])
                     else:
@@ -501,12 +530,6 @@ class RLtraining(Node):
                                 f"{avg_ver_reward_recent:.4f}", f"{avg_fwd_reward_recent:.4f}", f"{avg_lat_reward_recent:.4f}",
                                 f"{avg_ver_reward_episode:.4f}", f"{avg_fwd_reward_episode:.4f}", f"{avg_lat_reward_episode:.4f}"
                             ])
-
-                        # 성공 조건 업데이트
-                        if abs(avg_ver_reward_episode) < 0.2 and abs(avg_fwd_reward_episode) < 0.3 and abs(avg_lat_reward_episode) < 0.2:
-                            self.high_reward_count += 1
-                        else:
-                            self.high_reward_count = 0
 
                 else:
                     target_ned = np.array([0.0, 0.0, -10.0])

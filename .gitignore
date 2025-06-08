@@ -1,10 +1,10 @@
 /build/
 /install/
 /log/
-/results/
-data/03*
+/results/trial_and_error/
+/results/fwd_error_distance_data/
 __pycache__/
-yolov8n.pt
-/RL_model_temp*
 /pic/svg/
+/pic/trash/
 /data/
+/weights/yolov8n.pt

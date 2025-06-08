@@ -20,15 +20,20 @@ def run_command(command, cwd=None, wait=False, verbose=False):
     return process
 
 def main():
-    from datetime import datetime
-    start_time = datetime.now().strftime("%m%d_%H%M")
-    results_dir = os.path.join("/home/gr/iris_tracker_PID_RL/results", start_time)
-    os.makedirs(results_dir, exist_ok=True)
-    os.environ["RESULTS_DIR"] = results_dir
+
+    TIME_LIMIT = 5 * 60
+    training_start_ts = time.time()
+
+    # # 결과 디렉토리 설정
+    # from datetime import datetime
+    # start_time = datetime.now().strftime("%m%d_%H%M")
+    # results_dir = os.path.join("/home/gr/iris_tracker_PID_RL/results/trainig_logs", start_time)
+    # os.makedirs(results_dir, exist_ok=True)
+    # os.environ["RESULTS_DIR"] = results_dir
 
     Done = False
     episode = 0
-    max_episode = 200
+    max_episode = 300
     ws_dir = os.path.join(os.getcwd(), "iris_tracker_PID_RL")
     processes = []
 
@@ -71,19 +76,19 @@ def main():
             processes.append(iris_controller_process)
 
             # # 6. iris_camera_controller_PID node 실행
-            # controller_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && export PYTHONPATH=$PYTHONPATH:{ws_dir}/src/RL/RL && ros2 run controller iris_camera_controller_PID --ros-args -p mode:=pixel'"
+            # controller_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && ros2 run controller iris_camera_controller_PID --ros-args -p mode:=pixel'"
             # iris_camera_controller_process = run_command(controller_cmd, cwd=ws_dir, verbose=True)
             # processes.append(iris_camera_controller_process)
 
-            # # 6. iris_camera_controller_RL node 실행
-            # controller_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && export PYTHONPATH=$PYTHONPATH:{ws_dir}/src/RL/RL && ros2 run controller iris_camera_controller_RL --ros-args -p mode:=pixel'"
-            # iris_camera_controller_process = run_command(controller_cmd, cwd=ws_dir, verbose=True)
-            # processes.append(iris_camera_controller_process)
+            # 6. iris_camera_controller_RL node 실행
+            controller_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && ros2 run controller iris_camera_controller_RL --ros-args -p mode:=pixel'"
+            iris_camera_controller_process = run_command(controller_cmd, cwd=ws_dir, verbose=True)
+            processes.append(iris_camera_controller_process)
             
-            # 6. 모델 학습
-            training_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && export PYTHONPATH=$PYTHONPATH:{ws_dir}/src/RL/RL && ros2 run RL Decoupled_DDPG_train --ros-args -p max_episodes:={max_episode} -p episode:={episode} -p mode:=pixel'"
-            train_process = run_command(training_cmd, cwd=ws_dir, verbose=True)
-            processes.append(train_process)
+            # # 6. 모델 학습
+            # training_cmd = f"bash -c 'source ~/.bashrc && source ./install/local_setup.bash && export PYTHONPATH=$PYTHONPATH:{ws_dir}/src/RL/RL && ros2 run RL Decoupled_DDPG_train --ros-args -p max_episodes:={max_episode} -p episode:={episode} -p mode:=pixel'"
+            # train_process = run_command(training_cmd, cwd=ws_dir, verbose=True)
+            # processes.append(train_process)
 
             while True:
                 try:
@@ -91,6 +96,13 @@ def main():
                         print("종료 플래그 감지됨. 학습 종료.")
                         os.remove("/tmp/rl_episode_done.flag")
                         break
+
+                    if time.time() - training_start_ts > TIME_LIMIT:
+                        print("=== Time Out, 종료 시퀀스 진입 ===")
+                        # 학습 노드(RLtraining)에 SIGTERM → 모델 저장하도록 알림
+                        os.killpg(os.getpgid(iris_camera_controller_process.pid), signal.SIGTERM)
+                        Done = True           # 바깥 while 탈출
+                        break                 # 내부 while 탈출
                     time.sleep(1)
 
                 except KeyboardInterrupt:

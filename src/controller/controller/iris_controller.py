@@ -66,6 +66,7 @@ class iris_controller(Node):
         self.pos = np.array([0.0, 0.0, 0.0])
         self.pos_gps = np.array([0.0, 0.0, 0.0]) 
         self.vel = np.array([0.0, 0.0, 0.0])
+        self.min_max_speed = np.array([0.0, 0.0])  # [min_speed, max_speed]
         self.yaw = 0.0
         self.home_position = np.array([0.0, 0.0, 0.0])
         self.home_position_gps = np.array([0.0, 0.0, 0.0])  # Store initial GPS position
@@ -326,26 +327,33 @@ class iris_controller(Node):
 
     def random_waypoint_trajectory(self):
         now = self.get_clock().now().nanoseconds * 1e-9
+        dt = 0.05 # 20Hz
         t = now - self.start_time
 
-        if t < 5: return # wait for iris_camera to be ready
+        if t < 8: 
+            self.publish_setpoint(setpoint=self.pos)
+            return # wait for iris_camera to be ready
         
         if not hasattr(self, 'next_waypoint_time') or t >= self.next_waypoint_time:
-            self.next_waypoint_time = t + 0.01
-            speed = 0.2
+            self.next_waypoint_time = t + dt
             if hasattr(self, 'current_waypoint'):
-                random_direction = random.uniform(-math.pi, math.pi)
+
+                theta = np.random.uniform(0, 2 * np.pi)      # 수평 방향 (0 ~ 2pi)
+                phi   = np.random.uniform(-np.pi/2, np.pi/2) # 수직 방향 (-90도 ~ +90도)
+                speed = np.random.uniform(0.1, 0.2)          # 0.2 ~ about maximum 1.05 m/s
+
                 delta = np.array([
-                    speed * math.sin(random_direction),  # dx
-                    speed * math.cos(random_direction),  # dy
-                    0   # dz
+                    speed * math.cos(phi) * math.sin(theta),  # dx
+                    speed * math.cos(phi) * math.cos(theta),  # dy
+                    speed * math.sin(phi)                     # dz
                 ])
+
                 new_waypoint = self.current_waypoint + delta
 
                 clipped = np.clip(
                     new_waypoint,
-                    [-10.0, -10.0, -12.0],  # 최소 (x, y, z)
-                    [10.0, 10.0, -8.0]      # 최대 (x, y, z)
+                    [-8.0, -8.0, -11.0],  # 최소 (x, y, z)
+                    [8.0, 8.0, -9.0]      # 최대 (x, y, z)
                 )
 
                 origin = np.array([0.0, 0.0, -10.0])
@@ -360,11 +368,19 @@ class iris_controller(Node):
             else:
                 self.current_waypoint = self.pos
             
-            print(f"setpoint: [{self.current_waypoint[0]:.2f}, {self.current_waypoint[1]:.2f}, {self.current_waypoint[2]:.2f}]")
+            # print(f"setpoint: [{self.current_waypoint[0]:.2f}, {self.current_waypoint[1]:.2f}, {self.current_waypoint[2]:.2f}]")
+            # print(f"current time: {t:.2f} seconds")
         
         # 현재 웨이포인트로 이동
         if hasattr(self, 'current_waypoint'):
             self.publish_local2global_setpoint(local_setpoint=self.current_waypoint)
+
+            # speed = np.linalg.norm(self.vel)
+            # if speed > self.min_max_speed[1]:
+            #     self.min_max_speed[1] = speed
+            # if speed < self.min_max_speed[0] or self.min_max_speed[0] == 0.0:
+            #     self.min_max_speed[0] = speed
+            # print(f"min_max_speed: [{self.min_max_speed[0]:.2f}, {self.min_max_speed[1]:.2f}] m/s")
 
 def main(args=None):
     rclpy.init(args=args)
