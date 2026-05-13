@@ -31,6 +31,12 @@ To overcome the limitations of monocular vision, the distance is estimated by fi
 - **State**: Error in target center (Lateral, Vertical) and estimated distance error (Forward).
 - **Action**: Velocity Setpoints or Position Setpoints (North, East, Down, Yaw) for the quadrotor.
 
+#### Reward Function Design
+The RL agent is trained using a carefully designed reward function that penalizes tracking errors. The reward decreases as the error increases, with a steeper penalty for longitudinal (Forward) distance errors to ensure safety and stability.
+
+![Reward Design](pic/reward2.webp)
+
+
 ---
 
 ## 📂 Project Structure
@@ -51,10 +57,15 @@ To overcome the limitations of monocular vision, the distance is estimated by fi
 
 ## 📊 Experimental Results
 
-### Tracking Performance
-Comparison of tracking errors between the PID and DDPG controllers. The RL-based controller demonstrates more flexible adaptation in dynamic scenarios.
+### Training Progress
+The decoupled DDPG agents (Vertical, Forward, Lateral) show stable convergence over training steps. The history length of the state vector significantly impacts the learning stability and final performance.
 
-![Error Comparison](results/error_logs/error_plot_example.png) *(Note: Generated via `results/plot_results.py`)*
+![Training Logs](pic/traning_log_history.webp)
+
+### Performance Comparison
+We compared the tracking error of the classical PID controller against various DDPG configurations. The results show that DDPG agents, especially those with an optimized history length and ensemble approaches, achieve lower and more stable tracking errors compared to the traditional PID method.
+
+![Error Comparison](pic/Error_plots.webp)
 
 ### ROS Graph
 The communication structure between nodes is as follows:
